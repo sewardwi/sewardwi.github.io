@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>William Seward</title>
+  <title>Quantum Visualizations</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <script src="https://unpkg.com/react@18/umd/react.development.js" crossorigin></script>
   <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js" crossorigin></script>
@@ -13,14 +13,20 @@
   <nav id="navbar"></nav>
   <script type="text/babel" src="/components/navbar.js"></script>
 
-  <main class="max-w-4xl mx-auto px-4 py-12">
-    <h1 class="text-4xl font-bold mb-6">William Seward</h1>
-    <p class="text-lg text-gray-600 mb-8">Welcome to my personal site.</p>
+  <div id="root" class="max-w-4xl mx-auto px-4 py-8"></div>
 
-    <h2 class="text-2xl font-semibold mb-4">Interests</h2>
-    <ul class="space-y-2">
-      <li><a href="/quantum/" class="text-blue-600 hover:underline">Quantum Computing/Mechanics</a></li>
-    </ul>
-  </main>
+  <!-- Add visualization scripts here -->
+  <script type="text/babel" src="qbit-complex-plane.js"></script>
+  <script type="text/babel" src="bloch-sphere.js"></script>
+
+  <script type="text/babel">
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(
+      <div>
+        <QubitVisualization />
+        <BlochSphere />
+      </div>
+    );
+  </script>
 </body>
 </html>
