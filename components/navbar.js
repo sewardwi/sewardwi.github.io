@@ -1,6 +1,7 @@
 const NAV_LINKS = [
   { href: '/', label: 'Home' },
   { href: '/quantum/', label: 'Quantum' },
+  { href: '/langtons-ant/', label: "Langton's Ant" },
 ];
 
 function Navbar() {
