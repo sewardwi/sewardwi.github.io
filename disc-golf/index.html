@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Disc Golf — William Seward</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/react@18/umd/react.development.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js" crossorigin></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+</head>
+<body class="bg-gray-50 text-gray-900">
+  <nav id="navbar"></nav>
+  <script type="text/babel" src="/components/navbar.js"></script>
+
+  <div id="root"></div>
+
+  <script type="text/babel" src="disc-visualization.js"></script>
+  <script type="text/babel" src="flight-trajectory.js"></script>
+  <script type="text/babel">
+    function DiscGolfPage() {
+      return (
+        <div className="max-w-4xl mx-auto px-4 py-8">
+          <h1 className="text-3xl font-bold mb-2">Disc Golf Flight Physics</h1>
+          <p className="text-gray-600 mb-8">
+            Interactive visualizations exploring the aerodynamics and flight mechanics of disc golf discs.
+          </p>
+          <DiscVisualization />
+          <hr className="my-8 border-gray-300" />
+          <FlightTrajectory />
+          <hr className="my-8 border-gray-300" />
+          <StraightThrowChallenge />
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById('root')).render(<DiscGolfPage />);
+  </script>
+</body>
+</html>
