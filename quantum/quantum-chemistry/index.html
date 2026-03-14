@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Quantum Chemistry — William Seward</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/react@18/umd/react.development.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js" crossorigin></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://cdn.plot.ly/plotly-2.35.2.min.js" charset="utf-8"></script>
+</head>
+<body class="bg-gray-50 text-gray-900">
+  <nav id="navbar"></nav>
+  <script type="text/babel" src="/components/navbar.js"></script>
+
+  <div id="root"></div>
+
+  <script type="text/babel" src="vqe-loop.js"></script>
+  <script type="text/babel" src="vqe-energy-landscape.js"></script>
+  <script type="text/babel" src="h2-dissociation.js"></script>
+  <script type="text/babel" src="hamiltonian-mapping.js"></script>
+  <script type="text/babel" src="hamiltonian-decomposition.js"></script>
+  <script type="text/babel" src="barren-plateau.js"></script>
+  <script type="text/babel" src="hamiltonian-zoo.js"></script>
+  <script type="text/babel" src="noise-mitigation.js"></script>
+  <script type="text/babel">
+    function QuantumChemistryPage() {
+      return (
+        <div className="max-w-5xl mx-auto px-4 py-8">
+          <h1 className="text-3xl font-bold mb-2">Quantum Chemistry</h1>
+          <p className="text-gray-600 mb-8">
+            Interactive visualizations exploring how quantum computers solve chemistry problems —
+            from the variational quantum eigensolver (VQE) algorithm to mapping molecular Hamiltonians onto qubits.
+          </p>
+          <VQELoop />
+          <hr className="my-8 border-gray-300" />
+          <VQEEnergyLandscape />
+          <hr className="my-8 border-gray-300" />
+          <H2Dissociation />
+          <hr className="my-8 border-gray-300" />
+          <HamiltonianMapping />
+          <hr className="my-8 border-gray-300" />
+          <HamiltonianDecomposition />
+          <hr className="my-8 border-gray-300" />
+          <BarrenPlateau />
+          <hr className="my-8 border-gray-300" />
+          <HamiltonianZoo />
+          <hr className="my-8 border-gray-300" />
+          <NoiseMitigation />
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById('root')).render(<QuantumChemistryPage />);
+  </script>
+</body>
+</html>
