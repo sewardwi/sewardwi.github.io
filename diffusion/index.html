@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Diffusion Models — William Seward</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/react@18/umd/react.development.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js" crossorigin></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+</head>
+<body class="bg-gray-50 text-gray-900">
+  <nav id="navbar"></nav>
+  <script type="text/babel" src="/components/navbar.js"></script>
+
+  <div id="root"></div>
+
+  <script type="text/babel" src="forward-reverse.js"></script>
+  <script type="text/babel" src="score-field.js"></script>
+  <script type="text/babel" src="noise-schedule.js"></script>
+  <script type="text/babel">
+    function DiffusionPage() {
+      return (
+        <div className="max-w-5xl mx-auto px-4 py-8">
+          <h1 className="text-3xl font-bold mb-2">Diffusion Models</h1>
+          <p className="text-gray-600 mb-8">
+            Interactive visualizations exploring how diffusion models generate data by learning to reverse
+            a gradual noising process — the core idea behind DALL-E, Stable Diffusion, and modern generative AI.
+          </p>
+          <ForwardReverse />
+          <hr className="my-8 border-gray-300" />
+          <ScoreField />
+          <hr className="my-8 border-gray-300" />
+          <NoiseSchedule />
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById('root')).render(<DiffusionPage />);
+  </script>
+</body>
+</html>

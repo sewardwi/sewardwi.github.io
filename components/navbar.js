@@ -3,6 +3,7 @@ const NAV_LINKS = [
   { href: '/quantum/', label: 'Quantum' },
   { href: '/langtons-ant/', label: "Langton's Ant" },
   { href: '/disc-golf/', label: 'Disc Golf' },
+  { href: '/diffusion/', label: 'Diffusion Models' },
 ];
 
 function Navbar() {
