@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Quantum Arrow of Time — William Seward</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/react@18/umd/react.development.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js" crossorigin></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+</head>
+<body class="bg-gray-50 text-gray-900">
+  <nav id="navbar"></nav>
+  <script type="text/babel" src="/components/navbar.js"></script>
+
+  <div id="root"></div>
+
+  <script type="text/babel" src="arrow-histogram.js"></script>
+  <script type="text/babel" src="trajectory-viewer.js"></script>
+  <script type="text/babel" src="engine.js"></script>
+
+  <script type="text/babel">
+    function ArrowOfTimePage() {
+      return (
+        <div className="max-w-5xl mx-auto px-4 py-8">
+          <h1 className="text-3xl font-bold mb-1">Reshaping the Quantum Arrow of Time</h1>
+          <p className="text-gray-500 text-sm mb-2">
+            Based on{' '}
+            <a
+              href="https://arxiv.org/abs/2503.13615"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-blue-600 hover:underline"
+            >
+              arXiv:2503.13615
+            </a>
+            {' '}— Hamed Mohammady, Elias Zapusek, Florian Meier, Florentin Reiter (2025)
+          </p>
+          <p className="text-gray-600 mb-8 text-sm">
+            Quantum measurements create an arrow of time: monitored systems tend to evolve
+            in a statistically preferred direction. This paper shows that a specially engineered
+            feedback Hamiltonian H<sub>fback</sub> can tune this asymmetry at will — stretching,
+            erasing, or even inverting the arrow of time. The same framework powers a quantum
+            engine that extracts work from the measurement process itself.
+          </p>
+          <ArrowHistogram />
+          <hr className="my-8 border-gray-300" />
+          <TrajectoryViewer />
+          <hr className="my-8 border-gray-300" />
+          <MeasurementEngine />
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById('root')).render(<ArrowOfTimePage />);
+  </script>
+</body>
+</html>
