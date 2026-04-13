@@ -4,6 +4,7 @@ const NAV_LINKS = [
   { href: '/langtons-ant/', label: "Langton's Ant" },
   { href: '/disc-golf/', label: 'Disc Golf' },
   { href: '/diffusion/', label: 'Diffusion Models' },
+  { href: '/biefeld-brown/', label: 'Biefeld-Brown' },
 ];
 
 function Navbar() {

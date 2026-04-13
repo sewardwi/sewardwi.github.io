@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Biefeld-Brown Effect — William Seward</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/react@18/umd/react.development.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js" crossorigin></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+</head>
+<body class="bg-gray-50 text-gray-900">
+  <nav id="navbar"></nav>
+  <script type="text/babel" src="/components/navbar.js"></script>
+
+  <main class="max-w-4xl mx-auto px-4 py-12">
+    <h1 class="text-4xl font-bold mb-3">Biefeld-Brown Effect</h1>
+    <p class="text-gray-600 mb-8 text-base leading-relaxed max-w-2xl">
+      The Biefeld-Brown effect produces thrust in an asymmetric high-voltage capacitor — no moving parts, no fuel combustion.
+      A sharp emitter wire at high voltage creates a <em>corona discharge</em>, ionizing air molecules.
+      These ions accelerate toward the grounded collector, dragging neutral air along and generating a net ionic wind force.
+      The visualizations below explore the plasma physics, electrohydrodynamic (EHD) thrust mechanics, and electric field geometry.
+    </p>
+
+    <div id="root"></div>
+  </main>
+
+  <script type="text/babel" src="corona-animation.js"></script>
+  <script type="text/babel" src="thrust-calculator.js"></script>
+  <script type="text/babel" src="field-visualizer.js"></script>
+
+  <script type="text/babel">
+    function BiefeldBrownPage() {
+      return (
+        <div>
+          <CoronaAnimation />
+          <hr className="my-10 border-gray-200" />
+          <ThrustCalculator />
+          <hr className="my-10 border-gray-200" />
+          <FieldVisualizer />
+
+          <div className="mt-12 bg-gray-100 rounded-lg p-5 text-sm text-gray-700">
+            <h3 className="font-semibold text-base mb-2">Physics Background</h3>
+            <p className="mb-2">
+              The EHD thrust is governed by <strong>T = I · d / μ<sub>b</sub></strong>, where
+              <em> I</em> is the corona current, <em>d</em> the electrode gap, and <em>μ<sub>b</sub></em> ≈ 2×10⁻⁴ m²/(V·s)
+              the ion mobility in air. The current follows a Townsend-like law: <em>I ∝ (V − V₀)²</em>,
+              where <em>V₀</em> is the corona onset voltage set by Peek's law.
+            </p>
+            <p className="mb-2">
+              Field amplification near the sharp wire — proportional to <em>ln(d/r)</em> — drives the field
+              far above the ~3×10⁶ V/m breakdown threshold of air, initiating the corona discharge.
+              This non-uniform geometry is essential: symmetric capacitors produce no net thrust.
+            </p>
+            <p>
+              Maximum thrust efficiency occurs at an intermediate gap: too small and the field is too uniform;
+              too large and current falls off faster than the gap grows. Typical lifters operate at 20–40 kV
+              over 30–60 mm gaps, achieving thrust-to-power ratios of ~50–200 mN/kW.
+            </p>
+          </div>
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById('root')).render(<BiefeldBrownPage />);
+  </script>
+</body>
+</html>
