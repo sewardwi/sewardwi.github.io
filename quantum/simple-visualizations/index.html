@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Quantum Visualizations</title>
+  <title>Simple Visualizations — Quantum — William Seward</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <script src="https://unpkg.com/react@18/umd/react.development.js" crossorigin></script>
   <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js" crossorigin></script>
@@ -13,7 +13,12 @@
   <nav id="navbar"></nav>
   <script type="text/babel" src="/components/navbar.js"></script>
 
-  <div id="root" class="max-w-4xl mx-auto px-4 py-8"></div>
+  <main class="max-w-4xl mx-auto px-4 py-12">
+    <h1 class="text-4xl font-bold mb-6">Simple Visualizations</h1>
+    <p class="text-lg text-gray-600 mb-8">Interactive qubit and Bloch sphere demos.</p>
+
+    <div id="root"></div>
+  </main>
 
   <!-- Add visualization scripts here -->
   <script type="text/babel" src="qbit-complex-plane.js"></script>
