@@ -1,6 +1,7 @@
 const NAV_LINKS = [
   { href: '/', label: 'Home' },
   { href: '/quantum/', label: 'Quantum' },
+  { href: '/rocketry/', label: 'Rocketry' },
   { href: '/langtons-ant/', label: "Langton's Ant" },
   { href: '/disc-golf/', label: 'Disc Golf' },
   { href: '/diffusion/', label: 'Diffusion Models' },
@@ -20,7 +21,7 @@ function Navbar() {
             <a
               key={link.href}
               href={link.href}
-              className={isActive ? 'font-semibold text-blue-600' : 'hover:text-blue-600'}
+              className={isActive ? 'font-semibold text-blue-600' : 'text-gray-900 hover:text-blue-600'}
             >
               {link.label}
             </a>
