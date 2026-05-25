@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Starship Lunar Mission — Rocketry — William Seward</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/react@18/umd/react.development.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js" crossorigin></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <style>
+    body { background: #0a0a14; color: #e0e0e0; }
+    .panel { background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.08); border-radius: 12px; }
+  </style>
+</head>
+<body class="text-gray-100" style="background:#0a0a14;">
+  <nav id="navbar"></nav>
+  <script type="text/babel" src="/components/navbar.js"></script>
+
+  <main class="max-w-6xl mx-auto px-4 py-8">
+    <h1 class="text-3xl font-bold mb-2">Starship Lunar Mission</h1>
+    <p class="text-gray-400 mb-6">
+      Hot staging · Mechazilla catch · ~14 tanker refueling flights · NRHO insertion · HLS surface landing · ~15-day mission
+    </p>
+    <div id="root"></div>
+  </main>
+
+  <script type="text/babel" src="simulation.js"></script>
+
+  <script type="text/babel">
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<StarshipLunarPage />);
+  </script>
+</body>
+</html>
