@@ -36,8 +36,62 @@ const T_PARKING  = 900;
 const T_TLI      = 6300;
 const T_ICPS_SEP = T_TLI + 1160;  // end of TLI burn (~19 min)
 const T_SPLASH   = Math.round(T_TLI + FULL_P);
+const T_END      = T_SPLASH + 1800;  // a little past splashdown
 const T_SRB      = 126;
 const T_CORE     = 488;
+const T_INSERT   = 560;  // ICPS finishes orbital-insertion burn → parking orbit
+
+// ── Ascent profile (altitude/velocity vs. time) ─────────────────────────────────
+// Piecewise-linear keyframes approximating the SLS Block 1 powered ascent, used
+// for the Rocket view's readouts during the early powered flight (0 → parking
+// orbit). Past parking orbit the readouts come from the real Keplerian
+// trajectory instead (see missionState), so the whole mission stays continuous.
+const ASCENT_KEYS = [
+  // t (s),       alt (km),  vel (km/s)
+  [0,             0.0,       0.00],
+  [65,            13.5,      0.55],  // Max-Q
+  [T_SRB,         47,        1.85],  // SRB separation
+  [184,           78,        2.55],  // LAS jettison
+  [300,           128,       4.20],
+  [T_CORE,        162,       7.62],  // Core stage sep / MECO
+  [T_INSERT,      170,       7.79],  // ICPS insertion complete
+  [T_PARKING,     170,       7.81],  // 170 km parking orbit
+];
+
+function ascentState(t) {
+  const K = ASCENT_KEYS;
+  if (t <= K[0][0]) return { alt: K[0][1], vel: K[0][2] };
+  for (let i = 0; i < K.length - 1; i++) {
+    if (t <= K[i + 1][0]) {
+      const [t0, a0, v0] = K[i];
+      const [t1, a1, v1] = K[i + 1];
+      const f = (t - t0) / (t1 - t0);
+      return { alt: a0 + f * (a1 - a0), vel: v0 + f * (v1 - v0) };
+    }
+  }
+  const last = K[K.length - 1];
+  return { alt: last[1], vel: last[2] };
+}
+
+// Altitude (km above Earth's surface) + speed (km/s) at any mission time.
+// Powered ascent uses the realistic keyframes above; from parking orbit onward
+// it reads the actual trajectory so the Rocket view spans the full mission —
+// LEO → trans-lunar coast → ~400,000 km lunar flyby → return → splashdown.
+function missionState(t) {
+  if (t <= T_PARKING) return ascentState(t);
+  let r, vel;
+  if (t < T_TLI) {
+    r = R_PARK; vel = V_PARK;                                  // circular parking orbit
+  } else if (t <= T_SPLASH) {
+    const ep = ellipseXY(t - T_TLI);                           // transfer ellipse (vis-viva)
+    r = Math.hypot(ep.x, ep.y);
+    vel = Math.sqrt(MU_EARTH * (2 / r - 1 / A_TRANS));
+  } else {
+    const ep = ellipseXY(T_SPLASH - T_TLI);
+    r = Math.hypot(ep.x, ep.y); vel = 0;                       // splashed down
+  }
+  return { alt: r - R_EARTH, vel };
+}
 
 // Ascent arc ends at this angle (ENE direction)
 const ASCENT_END = Math.PI / 2 - 0.15 * Math.PI; // ≈ 1.1 rad
@@ -119,52 +173,462 @@ const PHASES = [
 ];
 
 // ── Trajectory generator ──────────────────────────────────────────────────────
-function generateTrajectory() {
-  const DT    = 60;
-  const TOTAL = T_SPLASH + 1800;
-  const pts   = [];
+// Position + phase for a given mission time.
+function posAt(t) {
+  let x, y, phase;
+  if (t <= T_PARKING) {
+    // Parametric gravity-turn ascent
+    const frac = Math.min(t / T_PARKING, 1);
+    const alt  = R_EARTH + frac * frac * 170;
+    const ang  = ASCENT_END + (1 - frac) * (Math.PI / 2 - ASCENT_END);
+    x = alt * Math.cos(ang);
+    y = alt * Math.sin(ang);
+    phase = t < T_SRB ? 'srb' : t < T_CORE ? 'core' : 'icps_coast';
 
-  for (let t = 0; t <= TOTAL; t += DT) {
-    const moon = moonPos(t);
-    let x, y, phase;
+  } else if (t < T_TLI) {
+    // Circular parking orbit (analytical Keplerian)
+    const theta = ASCENT_END - OMEGA_PARK * (t - T_PARKING);
+    x = R_PARK * Math.cos(theta);
+    y = R_PARK * Math.sin(theta);
+    phase = 'parking_orbit';
 
-    if (t <= T_PARKING) {
-      // Parametric gravity-turn ascent
-      const frac = Math.min(t / T_PARKING, 1);
-      const alt  = R_EARTH + frac * frac * 170;
-      const ang  = ASCENT_END + (1 - frac) * (Math.PI / 2 - ASCENT_END);
-      x = alt * Math.cos(ang);
-      y = alt * Math.sin(ang);
-      phase = t < T_SRB ? 'srb' : t < T_CORE ? 'core' : 'icps_coast';
+  } else if (t <= T_SPLASH) {
+    // Keplerian transfer ellipse (outbound + return = one full period)
+    const ep = ellipseXY(t - T_TLI);
+    x = ep.x; y = ep.y;
+    if (t < T_ICPS_SEP)             phase = 'tli_burn';
+    else if (t < T_FLYBY - 7200)    phase = 'cislunar';
+    else if (t < T_FLYBY + 7200)    phase = 'flyby_zone';
+    else                             phase = 'return_arc';
 
-    } else if (t < T_TLI) {
-      // Circular parking orbit (analytical Keplerian)
-      const theta = ASCENT_END - OMEGA_PARK * (t - T_PARKING);
-      x = R_PARK * Math.cos(theta);
-      y = R_PARK * Math.sin(theta);
-      phase = 'parking_orbit';
-
-    } else if (t <= T_SPLASH) {
-      // Keplerian transfer ellipse (outbound + return = one full period)
-      const T_TRANS = t - T_TLI;
-      const ep = ellipseXY(T_TRANS);
-      x = ep.x; y = ep.y;
-      if (t < T_ICPS_SEP)             phase = 'tli_burn';
-      else if (t < T_FLYBY - 7200)    phase = 'cislunar';
-      else if (t < T_FLYBY + 7200)    phase = 'flyby_zone';
-      else                             phase = 'return_arc';
-
-    } else {
-      // Past splashdown — freeze at Earth surface entry point
-      const ep = ellipseXY(T_SPLASH - T_TLI);
-      x = ep.x; y = ep.y;
-      phase = 'splashdown';
-    }
-
-    pts.push({ t, x, y, phase, moon });
+  } else {
+    // Past splashdown — freeze at Earth surface entry point
+    const ep = ellipseXY(T_SPLASH - T_TLI);
+    x = ep.x; y = ep.y;
+    phase = 'splashdown';
   }
+  return { x, y, phase };
+}
+
+function generateTrajectory() {
+  const TOTAL = T_END;
+  const pts   = [];
+  const push  = (t) => {
+    const p = posAt(t);
+    pts.push({ t, x: p.x, y: p.y, phase: p.phase, moon: moonPos(t) });
+  };
+
+  // Fine sampling through powered ascent + insertion so the Launch view is
+  // smooth and stage-separation events land precisely; coarse afterward.
+  for (let t = 0; t <= 1000; t += 5)        push(t);
+  for (let t = 1020; t <= TOTAL; t += 60)   push(t);
 
   return pts;
+}
+
+// ── Rocket view: SLS vehicle profile, stage separations, full mission ────────────
+// A vehicle-centric, side-profile animation. The rocket holds near screen center;
+// the altitude tape and ground scroll to convey climb, the stack tilts over in a
+// gravity turn, and each spent stage tumbles away as it separates. The altitude
+// axis is linear near the ground then logarithmic, so the same view follows the
+// whole mission out to the ~384,400 km lunar flyby and back to splashdown.
+//
+// Local rocket coords: origin at the core-engine gimbal plane, +x right, -y "up"
+// the stack. Dimensions are schematic (not to exact scale) but ordered correctly.
+const SLS = {
+  coreTop: -150, coreW: 26,          // orange core stage
+  lvsaTop: -164,                     // launch vehicle stage adapter
+  icpsTop: -200, icpsW: 18,          // ICPS (RL-10)
+  osaTop:  -210,                     // Orion stage adapter
+  smTop:   -232, smW: 20,            // service module
+  cmTop:   -250,                     // crew module (cone apex)
+  lasTop:  -288, lasNose: -306,      // launch abort system tower
+  srbX: 22, srbW: 16, srbTop: -190,  // solid rocket boosters
+};
+
+function drawPlume(ctx, x, yTop, width, length, colors, clock, seed) {
+  const flick = 0.78 + 0.22 * Math.sin(clock * 1.9 + seed) * Math.cos(clock * 0.7 + seed * 2);
+  const L = length * (0.85 + 0.15 * flick);
+  const g = ctx.createLinearGradient(0, yTop, 0, yTop + L);
+  g.addColorStop(0,   colors[0]);
+  g.addColorStop(0.45, colors[1]);
+  g.addColorStop(1,   colors[2]);
+  ctx.fillStyle = g;
+  ctx.beginPath();
+  ctx.moveTo(x - width / 2, yTop);
+  ctx.lineTo(x + width / 2, yTop);
+  ctx.lineTo(x + width * 0.12, yTop + L);
+  ctx.lineTo(x - width * 0.12, yTop + L);
+  ctx.closePath();
+  ctx.fill();
+}
+
+function drawRocketView(ctx, W, H, t) {
+  const { alt, vel } = missionState(t);
+  const rocketX = W * 0.32;
+  const rocketY = H * 0.60;
+  const flick   = performance.now() / 1000;      // wall clock → plumes flicker at any sim speed
+
+  // True-to-scale "camera". The SLS stack is ~98 m tall and is drawn ART_PX px in
+  // local art units. We pick a km→px scale that dollies OUT as the vehicle climbs
+  // and apply it to BOTH the altitude grid and the rocket art, so the altitude
+  // lines are always physically consistent with the on-screen size of the rocket.
+  const SLS_KM   = 0.098;                          // real SLS height
+  const ART_PX   = 324;                            // rocket art height (local px)
+  const A0_KM    = 100;                            // framing floor — small ⇒ zooms out fast. Large
+                                                   // keeps the stack big through all separations.
+  const viewKm   = (alt + A0_KM) * (0.34 / A0_KM); // visible vertical span; ~0.34 km on the pad
+  const pxPerKm  = H / viewKm;
+  const artScale = (SLS_KM * pxPerKm) / ART_PX;    // <1, shrinks with altitude
+  const a2y      = (a) => rocketY - (a - alt) * pxPerKm;
+  const groundY  = a2y(0);
+
+  const fmtAlt = (a) =>
+      a < 1    ? Math.round(a * 1000) + ' m'
+    : a < 100  ? a.toFixed(1) + ' km'
+    : a < 1000 ? Math.round(a) + ' km'
+    : a < 1e6  ? (a / 1000).toFixed(a < 1e4 ? 1 : 0) + 'k km'
+    :            (a / 1e6).toFixed(2) + 'M km';
+
+  // ── Background: space → sky glow → ground ────────────────────────────────────
+  ctx.fillStyle = '#04040d';
+  ctx.fillRect(0, 0, W, H);
+
+  // Stars (deterministic)
+  for (let i = 0; i < 260; i++) {
+    const sx = ((Math.sin(i * 7.31 + 0.4) + 1) / 2) * W;
+    const sy = ((Math.cos(i * 13.71 + 1.1) + 1) / 2) * H;
+    const br = 0.18 + 0.7 * ((i * 37 % 100) / 100);
+    ctx.fillStyle = `rgba(255,255,255,${br.toFixed(2)})`;
+    ctx.fillRect(sx, sy, i % 9 === 0 ? 2 : 1, i % 9 === 0 ? 2 : 1);
+  }
+
+  // Sky glow + ground (the surface drops away fast under the true-scale zoom)
+  if (groundY < H) {
+    const skyTop = groundY - 240;
+    if (skyTop < H) {
+      const ag = ctx.createLinearGradient(0, Math.max(0, skyTop), 0, groundY);
+      ag.addColorStop(0, 'rgba(46,120,210,0)');
+      ag.addColorStop(1, 'rgba(96,172,236,0.34)');
+      ctx.fillStyle = ag;
+      ctx.fillRect(0, Math.max(0, skyTop), W, groundY - Math.max(0, skyTop));
+    }
+    const gg = ctx.createLinearGradient(0, groundY, 0, H);
+    gg.addColorStop(0, '#2f74b8');
+    gg.addColorStop(1, '#0b2c54');
+    ctx.fillStyle = gg;
+    ctx.fillRect(0, groundY, W, H - groundY);
+    ctx.fillStyle = 'rgba(255,255,255,0.06)';
+    ctx.fillRect(0, groundY, W, 2);
+    if (alt < 0.12) {                              // launch tower, only on the pad
+      ctx.fillStyle = 'rgba(120,128,140,0.7)';
+      ctx.fillRect(rocketX + 70, groundY - 150, 7, 150);
+      ctx.fillRect(rocketX - 70, groundY - 8, 150, 8);
+    }
+  }
+
+  // ── Altitude tape (right edge) — ticks scale with the camera ─────────────────
+  const tapeX = W - 70;
+  ctx.strokeStyle = 'rgba(255,255,255,0.14)';
+  ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(tapeX, 0); ctx.lineTo(tapeX, H); ctx.stroke();
+  ctx.font = '10px monospace';
+  // "nice" step → ~7 divisions across the visible span
+  const niceStep = (span) => {
+    const raw = span / 7;
+    const mag = Math.pow(10, Math.floor(Math.log10(raw)));
+    const n = raw / mag;
+    return (n < 1.5 ? 1 : n < 3 ? 2 : n < 7 ? 5 : 10) * mag;
+  };
+  const step = niceStep(viewKm);
+  const aTop = alt + rocketY / pxPerKm;            // altitude at y = 0
+  const aBot = alt - (H - rocketY) / pxPerKm;       // altitude at y = H
+  for (let a = Math.ceil(Math.max(0, aBot) / step) * step; a <= aTop; a += step) {
+    const y = a2y(a);
+    if (y < 10 || y > H - 4) continue;
+    ctx.strokeStyle = 'rgba(255,255,255,0.18)';
+    ctx.beginPath(); ctx.moveTo(tapeX, y); ctx.lineTo(tapeX + 6, y); ctx.stroke();
+    ctx.fillStyle = 'rgba(170,180,200,0.65)';
+    ctx.fillText(fmtAlt(a), tapeX + 10, y + 3);
+  }
+
+  // Reference markers (dashed; only the in-view ones show)
+  const REF = [
+    [13.5,   'Max-Q'],
+    [47,     'SRB sep'],
+    [100,    'Kármán line'],
+    [162,    'MECO'],
+    [35786,  'GEO'],
+    [384400, 'Moon orbit'],
+  ];
+  for (const [a, lbl] of REF) {
+    const y = a2y(a);
+    if (y < 12 || y > H - 4) continue;
+    ctx.save();
+    ctx.setLineDash([4, 6]);
+    ctx.strokeStyle = 'rgba(120,170,255,0.22)';
+    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(tapeX, y); ctx.stroke();
+    ctx.restore();
+    ctx.fillStyle = 'rgba(150,180,235,0.5)';
+    ctx.fillText(lbl, tapeX - 82, y - 3);
+    if (lbl === 'Moon orbit') {                                // a little moon on its orbit line
+      const mx = W * 0.6, mr = 9;
+      const mg = ctx.createRadialGradient(mx - 3, y - 3, 0, mx, y, mr);
+      mg.addColorStop(0, '#e2ded4'); mg.addColorStop(0.6, '#a09890'); mg.addColorStop(1, '#3a3a3a');
+      ctx.fillStyle = mg;
+      ctx.beginPath(); ctx.arc(mx, y, mr, 0, Math.PI * 2); ctx.fill();
+    }
+  }
+  // Current-altitude pointer
+  ctx.fillStyle = '#60a5fa';
+  ctx.beginPath();
+  ctx.moveTo(tapeX, rocketY); ctx.lineTo(tapeX + 9, rocketY - 5); ctx.lineTo(tapeX + 9, rocketY + 5);
+  ctx.closePath(); ctx.fill();
+
+  // ── Liftoff exhaust cloud ────────────────────────────────────────────────────
+  if (alt < 8 && t < 18) {
+    const grow = 1 + t * 0.5;
+    for (let i = 0; i < 5; i++) {
+      const cx = rocketX + (i - 2) * 26 * grow * 0.4;
+      const r = 24 * grow + i * 4;
+      const cg = ctx.createRadialGradient(cx, groundY, 0, cx, groundY, r);
+      cg.addColorStop(0, 'rgba(230,230,235,0.45)');
+      cg.addColorStop(1, 'rgba(200,200,210,0)');
+      ctx.fillStyle = cg;
+      ctx.beginPath(); ctx.arc(cx, groundY, r, 0, Math.PI * 2); ctx.fill();
+    }
+  }
+
+  // ── Engine burn states ───────────────────────────────────────────────────────
+  const srbBurn  = t < T_SRB;
+  const coreBurn = t < T_CORE;
+  const icpsBurn = (t >= T_CORE && t < T_INSERT) || (t >= T_TLI && t < T_ICPS_SEP);
+
+  // ── Gravity-turn tilt (nose tips downrange / to the right) ───────────────────
+  const tf   = Math.min(t / T_CORE, 1);
+  const tilt = 1.15 * (1 - Math.cos(Math.PI * tf)) / 2;   // 0 → ~66°
+  const detailed = artScale * ART_PX >= 6;   // detailed stack while big enough, else a tracked icon
+  const S = SLS;
+
+  // ── Piece geometry (local art coords; reused both attached and separated) ─────
+  const artSRB = (bx, burning) => {
+    if (burning) drawPlume(ctx, bx, 18, S.srbW, 150,
+      ['rgba(255,244,190,0.95)', 'rgba(255,150,45,0.7)', 'rgba(255,70,20,0)'], flick, bx);
+    ctx.fillStyle = '#222428';
+    ctx.beginPath();
+    ctx.moveTo(bx - S.srbW * 0.32, 6); ctx.lineTo(bx + S.srbW * 0.32, 6);
+    ctx.lineTo(bx + S.srbW * 0.5, 18); ctx.lineTo(bx - S.srbW * 0.5, 18);
+    ctx.closePath(); ctx.fill();
+    const bg = ctx.createLinearGradient(bx - S.srbW / 2, 0, bx + S.srbW / 2, 0);
+    bg.addColorStop(0, '#cfcfd6'); bg.addColorStop(0.5, '#f0f0f4'); bg.addColorStop(1, '#b6b6c0');
+    ctx.fillStyle = bg;
+    ctx.fillRect(bx - S.srbW / 2, S.srbTop + 16, S.srbW, 6 - (S.srbTop + 16));
+    ctx.fillStyle = '#1c1c20';
+    ctx.beginPath();
+    ctx.moveTo(bx - S.srbW / 2, S.srbTop + 16); ctx.lineTo(bx + S.srbW / 2, S.srbTop + 16);
+    ctx.lineTo(bx, S.srbTop); ctx.closePath(); ctx.fill();
+    ctx.fillStyle = 'rgba(40,40,46,0.7)';
+    ctx.fillRect(bx - S.srbW / 2, S.srbTop + 50, S.srbW, 4);
+  };
+  const artCore = (burning) => {
+    if (burning) {
+      drawPlume(ctx, 0, 14, 22, 70, ['rgba(190,215,255,0.85)', 'rgba(120,160,255,0.4)', 'rgba(120,160,255,0)'], flick, 0);
+      drawPlume(ctx, 0, 14, 8, 96, ['rgba(255,255,255,0.9)', 'rgba(200,225,255,0.4)', 'rgba(200,225,255,0)'], flick, 3);
+    }
+    ctx.fillStyle = '#26272b';
+    for (const ex of [-9, -3, 3, 9]) {
+      ctx.beginPath();
+      ctx.moveTo(ex - 2, 0); ctx.lineTo(ex + 2, 0); ctx.lineTo(ex + 4, 14); ctx.lineTo(ex - 4, 14);
+      ctx.closePath(); ctx.fill();
+    }
+    const cg = ctx.createLinearGradient(-S.coreW / 2, 0, S.coreW / 2, 0);
+    cg.addColorStop(0, '#a8511e'); cg.addColorStop(0.5, '#d97a32'); cg.addColorStop(1, '#94481b');
+    ctx.fillStyle = cg;
+    ctx.fillRect(-S.coreW / 2, S.coreTop, S.coreW, 0 - S.coreTop);
+    ctx.fillStyle = 'rgba(120,60,24,0.6)';
+    ctx.fillRect(-S.coreW / 2, -96, S.coreW, 6);
+    ctx.fillStyle = '#7e3d18';
+    ctx.beginPath();
+    ctx.moveTo(-S.coreW / 2, 0); ctx.lineTo(S.coreW / 2, 0);
+    ctx.lineTo(S.coreW / 2 - 3, 8); ctx.lineTo(-S.coreW / 2 + 3, 8);
+    ctx.closePath(); ctx.fill();
+    ctx.fillStyle = '#9aa0a6';
+    ctx.beginPath();
+    ctx.moveTo(-S.coreW / 2, S.coreTop); ctx.lineTo(S.coreW / 2, S.coreTop);
+    ctx.lineTo(S.icpsW / 2, S.lvsaTop); ctx.lineTo(-S.icpsW / 2, S.lvsaTop);
+    ctx.closePath(); ctx.fill();
+  };
+  const artICPS = (burning) => {
+    if (burning) drawPlume(ctx, 0, S.lvsaTop + 2, 10, 60,
+      ['rgba(200,222,255,0.85)', 'rgba(130,170,255,0.4)', 'rgba(130,170,255,0)'], flick, 7);
+    const ig = ctx.createLinearGradient(-S.icpsW / 2, 0, S.icpsW / 2, 0);
+    ig.addColorStop(0, '#8a9096'); ig.addColorStop(0.5, '#c8ccd2'); ig.addColorStop(1, '#7e848a');
+    ctx.fillStyle = ig;
+    ctx.fillRect(-S.icpsW / 2, S.icpsTop, S.icpsW, S.lvsaTop - S.icpsTop);
+    ctx.fillStyle = '#8d9298';
+    ctx.beginPath();
+    ctx.moveTo(-S.icpsW / 2, S.icpsTop); ctx.lineTo(S.icpsW / 2, S.icpsTop);
+    ctx.lineTo(S.smW / 2, S.osaTop); ctx.lineTo(-S.smW / 2, S.osaTop);
+    ctx.closePath(); ctx.fill();
+  };
+  const artOrion = () => {
+    const sg = ctx.createLinearGradient(-S.smW / 2, 0, S.smW / 2, 0);
+    sg.addColorStop(0, '#2c3036'); sg.addColorStop(0.5, '#444a52'); sg.addColorStop(1, '#23272c');
+    ctx.fillStyle = sg;
+    ctx.fillRect(-S.smW / 2, S.smTop, S.smW, S.osaTop - S.smTop);
+    ctx.fillStyle = 'rgba(150,160,170,0.5)';
+    ctx.fillRect(-S.smW / 2, S.smTop + 6, S.smW, 2);
+    const cmg = ctx.createLinearGradient(-S.smW / 2, 0, S.smW / 2, 0);
+    cmg.addColorStop(0, '#b7bcc4'); cmg.addColorStop(0.5, '#e3e6ea'); cmg.addColorStop(1, '#a9aeb6');
+    ctx.fillStyle = cmg;
+    ctx.beginPath();
+    ctx.moveTo(-S.smW / 2, S.smTop); ctx.lineTo(S.smW / 2, S.smTop); ctx.lineTo(0, S.cmTop);
+    ctx.closePath(); ctx.fill();
+  };
+  const artLAS = () => {
+    ctx.fillStyle = '#b3b8be';
+    ctx.fillRect(-2.5, S.lasTop, 5, S.cmTop - S.lasTop);
+    ctx.fillStyle = '#cf3b2a';
+    ctx.fillRect(-4.5, S.lasNose + 8, 9, S.lasTop - (S.lasNose + 8));
+    ctx.fillStyle = '#d6d9de';
+    ctx.beginPath();
+    ctx.moveTo(-4.5, S.lasNose + 8); ctx.lineTo(4.5, S.lasNose + 8); ctx.lineTo(0, S.lasNose);
+    ctx.closePath(); ctx.fill();
+  };
+
+  // A spent stage drifting from the (camera-tracked) vehicle. Offsets are in SCREEN
+  // px so the piece falls back toward Earth and leaves the frame at any zoom: fall>0
+  // accelerates downward (gravity); fall<0 sends the LAS up and away.
+  const drawSpent = (sepT, cx, cy, fall, side, spin, artFn) => {
+    const e = t - sepT;
+    if (e < 0) return;
+    const alpha = Math.max(0, 1 - e / 90);
+    if (alpha <= 0) return;
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    // screen-space drift from the detach point (continuous at e=0, no jump)
+    ctx.translate(rocketX + side * e * pxPerKm, rocketY + 0.5 * fall * e * e * pxPerKm);
+    ctx.rotate(tilt);
+    ctx.scale(artScale, artScale);
+    ctx.translate(cx, cy); ctx.rotate(e * spin); ctx.translate(-cx, -cy);   // tumble about piece centre
+    artFn();
+    ctx.restore();
+    ctx.globalAlpha = 1;
+  };
+
+  if (!detailed) {
+    // Zoomed far out (deep cislunar): the to-scale rocket is sub-pixel — draw a marker.
+    ctx.save();
+    ctx.translate(rocketX, rocketY);
+    ctx.rotate(tilt);
+    const glow = ctx.createRadialGradient(0, 0, 0, 0, 0, 16);
+    glow.addColorStop(0, 'rgba(180,210,255,0.5)'); glow.addColorStop(1, 'rgba(180,210,255,0)');
+    ctx.fillStyle = glow; ctx.beginPath(); ctx.arc(0, 0, 16, 0, Math.PI * 2); ctx.fill();
+    if (srbBurn || coreBurn || icpsBurn) {
+      drawPlume(ctx, 0, 4, 7, 18, ['rgba(255,240,190,0.9)', 'rgba(255,150,45,0.5)', 'rgba(255,80,20,0)'], flick, 0);
+    }
+    ctx.fillStyle = '#e7eaee';
+    ctx.beginPath(); ctx.moveTo(0, -9); ctx.lineTo(4.5, 4); ctx.lineTo(-4.5, 4); ctx.closePath(); ctx.fill();
+    ctx.restore();
+  } else {
+    // Spent stages falling away (drawn first so the live stack overlays them at sep).
+    if (t >= T_SRB) {
+      drawSpent(T_SRB, -S.srbX, -90, 0.011, -0.013, -0.03, () => artSRB(-S.srbX, false));
+      drawSpent(T_SRB,  S.srbX, -90, 0.011,  0.013,  0.03, () => artSRB( S.srbX, false));
+    }
+    if (t >= T_CORE)     drawSpent(T_CORE, 0, -75, 0.012, -0.004, 0.012, () => artCore(false));
+    if (t >= T_ICPS_SEP) drawSpent(T_ICPS_SEP, 0, -185, 0.010, 0.004, 0.02, () => artICPS(false));
+    if (t >= 184)        drawSpent(184, 0, -278, -0.02, 0.012, 0.05, artLAS);   // LAS pulled up & away
+
+    // Live (still-attached) stack, camera-tracked at the vehicle.
+    ctx.save();
+    ctx.translate(rocketX, rocketY);
+    ctx.rotate(tilt);
+    ctx.scale(artScale, artScale);
+    if (t < T_SRB) { artSRB(-S.srbX, srbBurn); artSRB(S.srbX, srbBurn); }
+    if (t < T_CORE)     artCore(coreBurn);
+    if (t < T_ICPS_SEP) artICPS(icpsBurn);
+    artOrion();
+    if (t < 184)        artLAS();
+    ctx.restore();
+  }
+
+  // ── Readout / vehicle-config panel (screen space) ────────────────────────────
+  const panelX = 14, panelY = 14;
+  ctx.fillStyle = 'rgba(8,10,20,0.62)';
+  ctx.strokeStyle = 'rgba(255,255,255,0.08)';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  if (ctx.roundRect) ctx.roundRect(panelX, panelY, 210, 196, 8);
+  else ctx.rect(panelX, panelY, 210, 196);
+  ctx.fill(); ctx.stroke();
+
+  ctx.fillStyle = '#6b7280';
+  ctx.font = '9px monospace';
+  ctx.fillText('ALTITUDE', panelX + 14, panelY + 22);
+  ctx.fillText('VELOCITY', panelX + 112, panelY + 22);
+  ctx.fillStyle = '#60a5fa';
+  ctx.font = 'bold 19px monospace';
+  ctx.fillText(fmtAlt(alt), panelX + 14, panelY + 42);
+  ctx.fillStyle = '#34d399';
+  ctx.fillText(`${vel.toFixed(2)}`, panelX + 112, panelY + 42);
+  ctx.fillStyle = '#6b7280';
+  ctx.font = '9px monospace';
+  ctx.fillText('km/s', panelX + 158, panelY + 42);
+
+  ctx.strokeStyle = 'rgba(255,255,255,0.08)';
+  ctx.beginPath(); ctx.moveTo(panelX + 12, panelY + 54); ctx.lineTo(panelX + 198, panelY + 54); ctx.stroke();
+  ctx.fillStyle = '#6b7280'; ctx.font = '9px monospace';
+  ctx.fillText('VEHICLE STACK', panelX + 14, panelY + 70);
+
+  const CONFIG = [
+    { label: 'LAS tower',   color: '#cf3b2a', goneAt: 184,    note: 'jettison T+3:04' },
+    { label: 'Orion',       color: '#dfe3e8', goneAt: null,   note: 'crew' },
+    { label: 'ICPS',        color: '#c8ccd2', goneAt: T_ICPS_SEP, note: 'TLI stage' },
+    { label: 'Core stage',  color: '#d97a32', goneAt: T_CORE, note: '4× RS-25' },
+    { label: 'SRB × 2',     color: '#f0f0f4', goneAt: T_SRB,  note: '2× solid' },
+  ];
+  let ry = panelY + 86;
+  for (const c of CONFIG) {
+    const gone = c.goneAt != null && t >= c.goneAt;
+    ctx.globalAlpha = gone ? 0.34 : 1;
+    ctx.fillStyle = c.color;
+    ctx.beginPath(); ctx.arc(panelX + 19, ry - 3, 4, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = gone ? '#6b7280' : '#e5e7eb';
+    ctx.font = '11px monospace';
+    ctx.fillText(c.label, panelX + 30, ry);
+    if (gone) {
+      const tw = ctx.measureText(c.label).width;
+      ctx.strokeStyle = '#6b7280';
+      ctx.beginPath(); ctx.moveTo(panelX + 30, ry - 4); ctx.lineTo(panelX + 30 + tw, ry - 4); ctx.stroke();
+    }
+    ctx.fillStyle = '#5b616b'; ctx.font = '9px monospace';
+    ctx.fillText(c.note, panelX + 118, ry);
+    ctx.globalAlpha = 1;
+    ry += 21;
+  }
+
+  // ── Event flashes (window widens for the slow cislunar events) ───────────────
+  const FLASH = [
+    [T_SRB,      'SRB SEPARATION',        60],
+    [184,        'LAS JETTISON',          60],
+    [T_CORE,     'CORE STAGE SEP / MECO', 60],
+    [T_INSERT,   'ORBITAL INSERTION',     60],
+    [T_TLI,      'TRANS-LUNAR INJECTION', 420],
+    [T_ICPS_SEP, 'ICPS SEPARATION',       420],
+    [T_FLYBY,    'LUNAR FLYBY',           10800],
+    [T_SPLASH,   'SPLASHDOWN',            600],
+  ];
+  for (const [ft, lbl, win] of FLASH) {
+    const dt = t - ft;
+    if (dt >= 0 && dt < win) {
+      ctx.font = 'bold 16px monospace';
+      ctx.fillStyle = `rgba(255,255,255,${(1 - dt / win).toFixed(2)})`;
+      ctx.textAlign = 'center';
+      ctx.fillText(`✦ ${lbl}`, W / 2, 40);
+      ctx.textAlign = 'left';
+    }
+  }
 }
 
 // ── React component ───────────────────────────────────────────────────────────
@@ -173,10 +637,11 @@ function ArtemisSimulation() {
   const animRef   = React.useRef(null);
 
   const [trajectory,    setTrajectory]   = React.useState(null);
-  const [frameIdx,      setFrameIdx]     = React.useState(0);
+  // simTime is the single source of truth: mission elapsed seconds (a float).
+  const [simTime,       setSimTime]      = React.useState(0);
   const [playing,       setPlaying]      = React.useState(false);
-  const [speed,         setSpeed]        = React.useState(4);
-  const [viewMode,      setViewMode]     = React.useState('ascent');
+  const [speed,         setSpeed]        = React.useState(1);   // sim-seconds per real second (1 = real time)
+  const [viewMode,      setViewMode]     = React.useState('rocket');
   const [currentPhase,  setCurrentPhase] = React.useState(PHASES[0]);
   const [closestMoon,   setClosestMoon]  = React.useState(null);
 
@@ -196,33 +661,51 @@ function ArtemisSimulation() {
   }, []);
 
   React.useEffect(() => {
-    if (!playing || !trajectory) return;
-    const step = () => {
-      setFrameIdx(idx => {
-        const next = Math.min(idx + speed, trajectory.length - 1);
-        if (next >= trajectory.length - 1) setPlaying(false);
+    if (!playing) return;
+    // Wall-clock driven: advance simTime by (real seconds × speed). At speed 1 the
+    // mission unfolds in true real time — the launch takes its real ~8½ min to MECO.
+    let last = performance.now();
+    const step = (now) => {
+      const dtReal = Math.min(0.1, (now - last) / 1000);   // clamp tab-stall jumps
+      last = now;
+      setSimTime(prev => {
+        const next = prev + dtReal * speed;
+        if (next >= T_END) { setPlaying(false); return T_END; }
         return next;
       });
       animRef.current = requestAnimationFrame(step);
     };
     animRef.current = requestAnimationFrame(step);
     return () => cancelAnimationFrame(animRef.current);
-  }, [playing, trajectory, speed]);
+  }, [playing, speed]);
 
   React.useEffect(() => {
-    if (!trajectory || frameIdx >= trajectory.length) return;
-    const t = trajectory[frameIdx].t;
     let ph = PHASES[0];
-    for (const p of PHASES) { if (t >= p.t) ph = p; }
+    for (const p of PHASES) { if (simTime >= p.t) ph = p; }
     setCurrentPhase(ph);
-  }, [frameIdx, trajectory]);
+  }, [simTime]);
 
   // ── Canvas draw ──────────────────────────────────────────────────────────────
   React.useEffect(() => {
-    if (!trajectory || !canvasRef.current) return;
+    if (!canvasRef.current) return;
     const canvas = canvasRef.current;
     const ctx    = canvas.getContext('2d');
     const W = canvas.width, H = canvas.height;
+
+    const simT = Math.max(0, Math.min(simTime, T_END));
+
+    // Dedicated vehicle-profile rocket view (continuous, no trajectory needed).
+    if (viewMode === 'rocket') {
+      drawRocketView(ctx, W, H, simT);
+      return;
+    }
+    if (!trajectory) return;   // orbital views need the precomputed path
+
+    // Current vehicle position/index for the orbital views.
+    const pa = posAt(simT);
+    const pt = { t: simT, x: pa.x, y: pa.y, moon: moonPos(simT) };
+    let frameIdx = 0;
+    for (let i = 0; i < trajectory.length; i++) { if (trajectory[i].t <= simT) frameIdx = i; else break; }
 
     const VIEW_R = viewMode === 'ascent' ? 20000 : 460000;
     const scale  = (Math.min(W, H) / 2) / VIEW_R;
@@ -242,8 +725,6 @@ function ArtemisSimulation() {
       const sz = i % 9 === 0 ? 2 : 1;
       ctx.fillRect(sx - sz/2, sy - sz/2, sz, sz);
     }
-
-    const pt = trajectory[Math.min(frameIdx, trajectory.length - 1)];
 
     // Earth
     const es = sc(0, 0);
@@ -402,16 +883,17 @@ function ArtemisSimulation() {
       ctx.fillText(`Closest lunar approach: ${closestMoon.alt.toLocaleString()} km alt`, 10, H - 24);
     }
 
-  }, [frameIdx, trajectory, viewMode, closestMoon]);
+  }, [simTime, trajectory, viewMode, closestMoon]);
 
-  const fmt = (s) => {
+  const fmt = (sec) => {
+    const s = Math.floor(sec);
     if (s < 60)    return `T+${s}s`;
     if (s < 3600)  return `T+${Math.floor(s/60)}m ${s%60}s`;
     if (s < 86400) return `T+${Math.floor(s/3600)}h ${Math.floor((s%3600)/60)}m`;
     return `T+${Math.floor(s/86400)}d ${Math.floor((s%86400)/3600)}h`;
   };
 
-  const tNow = trajectory ? trajectory[Math.min(frameIdx, trajectory.length-1)].t : 0;
+  const tNow = Math.max(0, Math.min(simTime, T_END));
 
   const box = {
     background: 'rgba(255,255,255,0.04)',
@@ -443,27 +925,31 @@ function ArtemisSimulation() {
           background: playing ? '#374151' : '#2563eb', color: '#fff', fontWeight: '600', fontSize: '14px',
         }}>{playing ? '⏸ Pause' : '▶ Play'}</button>
 
-        <button onClick={() => { setFrameIdx(0); setPlaying(false); }} style={{
+        <button onClick={() => { setSimTime(0); setPlaying(false); }} style={{
           padding: '8px 14px', borderRadius: '8px', border: 'none', cursor: 'pointer',
           background: '#1f2937', color: '#9ca3af', fontSize: '13px',
         }}>↺ Reset</button>
 
         <div style={{ display:'flex', alignItems:'center', gap:'5px', color:'#9ca3af', fontSize:'12px' }}>
           <span>Speed:</span>
-          {[1, 4, 16, 64, 256].map(s => btn(speed === s, () => setSpeed(s), `${s}×`))}
+          {[1, 10, 100, 1000, 10000, 60000].map(s => (
+            <React.Fragment key={s}>
+              {btn(speed === s, () => setSpeed(s), s >= 1000 ? `${s / 1000}k×` : `${s}×`)}
+            </React.Fragment>
+          ))}
+          <span style={{ fontSize:'10px', color:'#5b616b' }}>(1× = real time)</span>
         </div>
 
         <div style={{ display:'flex', alignItems:'center', gap:'5px', color:'#9ca3af', fontSize:'12px' }}>
           <span>View:</span>
-          {btn(viewMode==='ascent', () => setViewMode('ascent'), 'Ascent', { activeBg:'#065f46', activeColor:'#6ee7b7' })}
+          {btn(viewMode==='rocket', () => setViewMode('rocket'), 'Rocket', { activeBg:'#065f46', activeColor:'#6ee7b7' })}
+          {btn(viewMode==='ascent', () => setViewMode('ascent'), 'Orbit', { activeBg:'#065f46', activeColor:'#6ee7b7' })}
           {btn(viewMode==='cislunar', () => setViewMode('cislunar'), 'Cislunar', { activeBg:'#065f46', activeColor:'#6ee7b7' })}
         </div>
 
-        {trajectory && (
-          <input type="range" min={0} max={trajectory.length-1} value={frameIdx}
-            onChange={e => { setFrameIdx(Number(e.target.value)); setPlaying(false); }}
-            style={{ flex: 1, minWidth: '80px', accentColor: '#2563eb' }} />
-        )}
+        <input type="range" min={0} max={T_END} step={1} value={tNow}
+          onChange={e => { setSimTime(Number(e.target.value)); setPlaying(false); }}
+          style={{ flex: 1, minWidth: '80px', accentColor: '#2563eb' }} />
       </div>
 
       {/* Status */}
@@ -493,11 +979,7 @@ function ArtemisSimulation() {
               const past   = tNow >= ph.t;
               const active = ph.id === currentPhase.id;
               return (
-                <button key={ph.id} onClick={() => {
-                  if (!trajectory) return;
-                  const idx = trajectory.findIndex(p => p.t >= ph.t);
-                  if (idx >= 0) { setFrameIdx(idx); setPlaying(false); }
-                }} style={{
+                <button key={ph.id} onClick={() => { setSimTime(ph.t); setPlaying(false); }} style={{
                   display:'flex', alignItems:'center', gap:'7px',
                   padding:'6px 8px', borderRadius:'6px', border:'none', textAlign:'left', cursor:'pointer',
                   background: active ? 'rgba(37,99,235,0.18)' : 'transparent',
@@ -519,24 +1001,41 @@ function ArtemisSimulation() {
 
         <div style={{ ...box, padding:'16px' }}>
           <div style={{ fontSize:'10px', color:'#6b7280', textTransform:'uppercase', letterSpacing:'0.08em', marginBottom:'10px' }}>
-            Trail Colors
+            {viewMode === 'rocket' ? 'SLS Block 1 Stack' : 'Trail Colors'}
           </div>
           <div style={{ display:'flex', flexDirection:'column', gap:'7px' }}>
-            {[
-              ['#ff9428','SRB phase'],
-              ['#ffd040','Core stage'],
-              ['#38aaff','Parking orbit'],
-              ['#d848ff','TLI burn'],
-              ['#44ff7a','Cislunar coast'],
-              ['#ffdd44','Lunar flyby zone'],
-              ['#ff5555','Return arc'],
-            ].map(([color, label]) => (
+            {(viewMode === 'rocket'
+              ? [
+                  ['#cf3b2a','Launch Abort System'],
+                  ['#dfe3e8','Orion (crew + ESM)'],
+                  ['#c8ccd2','ICPS — RL-10'],
+                  ['#d97a32','Core stage — 4× RS-25'],
+                  ['#f0f0f4','Solid Rocket Boosters'],
+                ]
+              : [
+                  ['#ff9428','SRB phase'],
+                  ['#ffd040','Core stage'],
+                  ['#38aaff','Parking orbit'],
+                  ['#d848ff','TLI burn'],
+                  ['#44ff7a','Cislunar coast'],
+                  ['#ffdd44','Lunar flyby zone'],
+                  ['#ff5555','Return arc'],
+                ]
+            ).map(([color, label]) => (
               <div key={label} style={{ display:'flex', alignItems:'center', gap:'8px' }}>
-                <div style={{ width:'22px', height:'3px', borderRadius:'2px', background:color, flexShrink:0 }} />
+                <div style={{ width: viewMode==='rocket' ? '12px' : '22px', height: viewMode==='rocket' ? '12px' : '3px',
+                  borderRadius: viewMode==='rocket' ? '50%' : '2px', background:color, flexShrink:0 }} />
                 <span style={{ fontSize:'11px', color:'#9ca3af' }}>{label}</span>
               </div>
             ))}
           </div>
+          {viewMode === 'rocket' && (
+            <div style={{ fontSize:'10px', color:'#5b616b', marginTop:'12px', lineHeight:'1.5' }}>
+              Drawn true-to-scale: the altitude grid matches the rocket's real
+              size, and the camera dollies out as it climbs. At 1× the launch
+              runs in real time. Spent stages tumble away as they separate.
+            </div>
+          )}
         </div>
       </div>
     </div>
