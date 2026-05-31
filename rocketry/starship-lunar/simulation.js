@@ -3,17 +3,9 @@
 // powered descent, surface stay, ascent back to NRHO.
 // Reference architecture: SpaceX HLS for Artemis III.
 
-// ── Physical constants ────────────────────────────────────────────────────────
-const G        = 6.674e-20;
-const M_EARTH  = 5.972e24;
-const M_MOON   = 7.342e22;
-const R_EARTH  = 6371;
-const R_MOON   = 1737;
-const MU_EARTH = G * M_EARTH;
-const MU_MOON  = G * M_MOON;
-const MOON_SMA    = 384400;
-const MOON_PERIOD = 27.321 * 86400;
-const MOON_SOI    = 66100;
+// Physical constants (G, M_EARTH, M_MOON, R_EARTH, R_MOON, MU_EARTH, MU_MOON,
+// MOON_SMA, MOON_PERIOD, MOON_SOI) come from the shared /rocketry/constants.js,
+// loaded before this script.
 
 // ── Vehicle parameters (Starship HLS) ─────────────────────────────────────────
 const HEIGHT_STACK     = 121.3;        // m (Super Heavy + Starship Block 2)

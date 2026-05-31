@@ -7,15 +7,8 @@
 // returns to Earth periapsis at T+10 days (splashdown) — no propulsion needed.
 // Moon phase is pre-computed so the Moon is at the apoapsis point at flyby.
 
-// ── Constants ─────────────────────────────────────────────────────────────────
-const G        = 6.674e-20;
-const M_EARTH  = 5.972e24;
-const M_MOON   = 7.342e22;
-const R_EARTH  = 6371;       // km
-const R_MOON   = 1737;       // km
-const MU_EARTH = G * M_EARTH; // ≈ 398600.4 km³/s²
-const MOON_SMA    = 384400;   // km (Moon's semi-major axis)
-const MOON_PERIOD = 27.321 * 86400; // s
+// Physical constants (G, M_EARTH, R_EARTH, MU_EARTH, MOON_SMA, MOON_PERIOD, …)
+// come from the shared /rocketry/constants.js, loaded before this script.
 
 // ── Transfer ellipse parameters ───────────────────────────────────────────────
 // R_APO is set PAST the Moon's orbit so the trajectory crosses Moon's orbit
