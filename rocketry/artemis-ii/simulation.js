@@ -114,29 +114,13 @@ const FLYBY_ALT_KM = 10637;
 const FLYBY_OFFSET = Math.asin(Math.min(FLYBY_ALT_KM / MOON_SMA, 1)); // ≈ 0.0277 rad
 const MOON_START   = (THETA_CROSS + FLYBY_OFFSET) - (2 * Math.PI * T_FLYBY / MOON_PERIOD);
 
-const moonPos = (t) => {
-  const a = MOON_START + (2 * Math.PI * t) / MOON_PERIOD;
-  return { x: MOON_SMA * Math.cos(a), y: MOON_SMA * Math.sin(a) };
-};
+// Moon position (phase-locked so the flyby geometry lands right) and the transfer
+// ellipse position both use the shared helpers from sim-core.js.
+const moonPos = (t) => moonOrbitXY(t, MOON_START);
 
-// ── Kepler eccentric anomaly solver ───────────────────────────────────────────
-function solveKepler(M, ecc) {
-  let E = M;
-  for (let i = 0; i < 12; i++) E -= (E - ecc * Math.sin(E) - M) / (1 - ecc * Math.cos(E));
-  return E;
-}
-
-// Position on transfer ellipse, T_TRANS seconds after TLI periapsis pass
+// Position on the transfer ellipse, T_TRANS seconds after TLI periapsis pass.
 function ellipseXY(T_TRANS) {
-  const M  = N_TRANS * T_TRANS;
-  const E  = solveKepler(M, ECC);
-  const r  = A_TRANS * (1 - ECC * Math.cos(E));
-  const nu = 2 * Math.atan2(
-    Math.sqrt(1 + ECC) * Math.sin(E / 2),
-    Math.sqrt(1 - ECC) * Math.cos(E / 2)
-  );
-  const ang = nu + THETA_TLI;
-  return { x: r * Math.cos(ang), y: r * Math.sin(ang) };
+  return keplerXY(A_TRANS, ECC, N_TRANS, T_TRANS, THETA_TLI);
 }
 
 // ── Mission timeline ──────────────────────────────────────────────────────────
@@ -626,17 +610,9 @@ function drawRocketView(ctx, W, H, t) {
 
 // ── React component ───────────────────────────────────────────────────────────
 function ArtemisSimulation() {
-  const canvasRef = React.useRef(null);
-  const animRef   = React.useRef(null);
-
-  const [trajectory,    setTrajectory]   = React.useState(null);
-  // simTime is the single source of truth: mission elapsed seconds (a float).
-  const [simTime,       setSimTime]      = React.useState(0);
-  const [playing,       setPlaying]      = React.useState(false);
-  const [speed,         setSpeed]        = React.useState(1);   // sim-seconds per real second (1 = real time)
-  const [viewMode,      setViewMode]     = React.useState('rocket');
-  const [currentPhase,  setCurrentPhase] = React.useState(PHASES[0]);
-  const [closestMoon,   setClosestMoon]  = React.useState(null);
+  // Page-specific state only; playback/chrome live in the shared <RocketrySim>.
+  const [trajectory,  setTrajectory]  = React.useState(null);
+  const [closestMoon, setClosestMoon] = React.useState(null);
 
   React.useEffect(() => {
     const id = setTimeout(() => {
@@ -653,111 +629,42 @@ function ArtemisSimulation() {
     return () => clearTimeout(id);
   }, []);
 
-  React.useEffect(() => {
-    if (!playing) return;
-    // Wall-clock driven: advance simTime by (real seconds × speed). At speed 1 the
-    // mission unfolds in true real time — the launch takes its real ~8½ min to MECO.
-    let last = performance.now();
-    const step = (now) => {
-      const dtReal = Math.min(0.1, (now - last) / 1000);   // clamp tab-stall jumps
-      last = now;
-      setSimTime(prev => {
-        const next = prev + dtReal * speed;
-        if (next >= T_END) { setPlaying(false); return T_END; }
-        return next;
-      });
-      animRef.current = requestAnimationFrame(step);
-    };
-    animRef.current = requestAnimationFrame(step);
-    return () => cancelAnimationFrame(animRef.current);
-  }, [playing, speed]);
+  // Trajectory precompute (orbital trail + closest-approach readout).
+  // ── Canvas renderer handed to the shared base each frame ─────────────────────
+  const draw = React.useCallback((ctx, { W, H, t, view }) => {
+    // Vehicle-profile rocket view (continuous; needs no trajectory).
+    if (view === 'rocket') { drawRocketView(ctx, W, H, t); return; }
 
-  React.useEffect(() => {
-    let ph = PHASES[0];
-    for (const p of PHASES) { if (simTime >= p.t) ph = p; }
-    setCurrentPhase(ph);
-  }, [simTime]);
-
-  // ── Canvas draw ──────────────────────────────────────────────────────────────
-  React.useEffect(() => {
-    if (!canvasRef.current) return;
-    const canvas = canvasRef.current;
-    const ctx    = canvas.getContext('2d');
-    const W = canvas.width, H = canvas.height;
-
-    const simT = Math.max(0, Math.min(simTime, T_END));
-
-    // Dedicated vehicle-profile rocket view (continuous, no trajectory needed).
-    if (viewMode === 'rocket') {
-      drawRocketView(ctx, W, H, simT);
-      return;
-    }
-    if (!trajectory) return;   // orbital views need the precomputed path
-
-    // Current vehicle position/index for the orbital views.
-    const pa = posAt(simT);
-    const pt = { t: simT, x: pa.x, y: pa.y, moon: moonPos(simT) };
-    let frameIdx = 0;
-    for (let i = 0; i < trajectory.length; i++) { if (trajectory[i].t <= simT) frameIdx = i; else break; }
-
-    const VIEW_R = viewMode === 'ascent' ? 20000 : 460000;
-    const scale  = (Math.min(W, H) / 2) / VIEW_R;
-    const ox = W / 2, oy = H / 2;
-    const sc = (kx, ky) => ({ sx: ox + kx * scale, sy: oy - ky * scale });
-
-    // Background
+    // Orbital views (Orbit / Cislunar)
     ctx.fillStyle = '#05050f';
     ctx.fillRect(0, 0, W, H);
+    drawStarfield(ctx, W, H, 320);
+    if (!trajectory) return;
 
-    // Stars (deterministic)
-    for (let i = 0; i < 320; i++) {
-      const sx = ((Math.sin(i * 7.31 + 0.4) + 1) / 2) * W;
-      const sy = ((Math.cos(i * 13.71 + 1.1) + 1) / 2) * H;
-      const br = 0.2 + 0.8 * ((i * 37 % 100) / 100);
-      ctx.fillStyle = `rgba(255,255,255,${br.toFixed(2)})`;
-      const sz = i % 9 === 0 ? 2 : 1;
-      ctx.fillRect(sx - sz/2, sy - sz/2, sz, sz);
-    }
+    const pa = posAt(t);
+    const pt = { t, x: pa.x, y: pa.y, moon: moonPos(t) };
+    let frameIdx = 0;
+    for (let i = 0; i < trajectory.length; i++) { if (trajectory[i].t <= t) frameIdx = i; else break; }
 
-    // Earth
+    const VIEW_R = view === 'ascent' ? 20000 : 460000;
+    const { scale, sc } = makeProjector(W, H, VIEW_R);
+    const ox = W / 2;
+
     const es = sc(0, 0);
-    const er = Math.max(7, R_EARTH * scale);
-    const eg = ctx.createRadialGradient(es.sx - er * 0.2, es.sy - er * 0.25, 0, es.sx, es.sy, er);
-    eg.addColorStop(0, '#5baae8');
-    eg.addColorStop(0.35, '#2c74c9');
-    eg.addColorStop(0.7, '#17448a');
-    eg.addColorStop(1,   '#091e3e');
-    ctx.beginPath(); ctx.arc(es.sx, es.sy, er, 0, Math.PI * 2);
-    ctx.fillStyle = eg; ctx.fill();
-    // Atmosphere glow
-    const atm = ctx.createRadialGradient(es.sx, es.sy, er * 0.97, es.sx, es.sy, er * 1.15);
-    atm.addColorStop(0, 'rgba(80,180,255,0.2)');
-    atm.addColorStop(1, 'rgba(80,180,255,0)');
-    ctx.beginPath(); ctx.arc(es.sx, es.sy, er * 1.15, 0, Math.PI * 2);
-    ctx.fillStyle = atm; ctx.fill();
+    drawEarth(ctx, es, scale);
 
-    if (viewMode !== 'ascent') {
-      // Moon orbit ring
+    if (view !== 'ascent') {
+      // Moon orbit ring + body
       ctx.save();
       ctx.setLineDash([5, 14]);
       ctx.beginPath(); ctx.arc(es.sx, es.sy, MOON_SMA * scale, 0, Math.PI * 2);
       ctx.strokeStyle = 'rgba(255,255,255,0.06)'; ctx.lineWidth = 1; ctx.stroke();
       ctx.restore();
-
-      // Moon body
-      const ms = sc(pt.moon.x, pt.moon.y);
-      const mr = Math.max(5, R_MOON * scale);
-      const mg = ctx.createRadialGradient(ms.sx - mr * 0.2, ms.sy - mr * 0.2, 0, ms.sx, ms.sy, mr);
-      mg.addColorStop(0, '#e2ded4'); mg.addColorStop(0.55, '#a09890'); mg.addColorStop(1, '#383838');
-      ctx.beginPath(); ctx.arc(ms.sx, ms.sy, mr, 0, Math.PI * 2);
-      ctx.fillStyle = mg; ctx.fill();
-      ctx.fillStyle = 'rgba(210,205,195,0.8)';
-      ctx.font = '11px monospace';
-      ctx.fillText('Moon', ms.sx + mr + 4, ms.sy + 4);
+      drawMoon(ctx, sc(pt.moon.x, pt.moon.y), scale, { minR: 5 });
     }
 
     // Full ellipse ghost (faint)
-    if (viewMode !== 'ascent') {
+    if (view !== 'ascent') {
       ctx.save();
       ctx.setLineDash([3, 10]);
       ctx.strokeStyle = 'rgba(255,255,255,0.05)';
@@ -785,11 +692,6 @@ function ArtemisSimulation() {
       return_arc:   '#ff5555',
       splashdown:   '#ffffff',
     };
-    const hexToRgb = (hex) => ({
-      r: parseInt(hex.slice(1,3),16),
-      g: parseInt(hex.slice(3,5),16),
-      b: parseInt(hex.slice(5,7),16),
-    });
     const TRAIL = Math.min(frameIdx, 1200);
     for (let i = Math.max(0, frameIdx - TRAIL); i < frameIdx; i++) {
       const p0 = trajectory[i], p1 = trajectory[i + 1];
@@ -827,13 +729,7 @@ function ArtemisSimulation() {
     // Orion dot
     const vs = sc(pt.x, pt.y);
     if (vs.sx > -30 && vs.sx < W+30 && vs.sy > -30 && vs.sy < H+30) {
-      const glow = ctx.createRadialGradient(vs.sx, vs.sy, 0, vs.sx, vs.sy, 20);
-      glow.addColorStop(0, 'rgba(255,255,255,0.35)');
-      glow.addColorStop(1, 'rgba(255,255,255,0)');
-      ctx.beginPath(); ctx.arc(vs.sx, vs.sy, 20, 0, Math.PI * 2);
-      ctx.fillStyle = glow; ctx.fill();
-      ctx.beginPath(); ctx.arc(vs.sx, vs.sy, 5, 0, Math.PI * 2);
-      ctx.fillStyle = '#ffffff'; ctx.fill();
+      drawVehicleDot(ctx, vs.sx, vs.sy, { glow: 20 });
 
       const dist = Math.sqrt(pt.x*pt.x + pt.y*pt.y);
       const alt  = dist - R_EARTH;
@@ -842,7 +738,7 @@ function ArtemisSimulation() {
       ctx.fillText(lbl, vs.sx + 11, vs.sy - 8);
 
       // Distance to Moon label (when in cislunar view)
-      if (viewMode !== 'ascent') {
+      if (view !== 'ascent') {
         const dx = pt.x - pt.moon.x, dy = pt.y - pt.moon.y;
         const dMoon = Math.round(Math.sqrt(dx*dx+dy*dy));
         ctx.fillStyle = 'rgba(200,200,255,0.7)'; ctx.font = '10px monospace';
@@ -860,7 +756,7 @@ function ArtemisSimulation() {
       }
     }
     const flybyDt = Math.abs(pt.t - T_FLYBY);
-    if (flybyDt < 10800 && viewMode !== 'ascent') {
+    if (flybyDt < 10800 && view !== 'ascent') {
       const alpha = (1 - flybyDt / 10800).toFixed(2);
       ctx.font = 'bold 13px monospace';
       ctx.fillStyle = `rgba(255,230,100,${alpha})`;
@@ -871,166 +767,57 @@ function ArtemisSimulation() {
 
     // Corner info
     ctx.font = '10px monospace'; ctx.fillStyle = 'rgba(100,100,130,0.6)';
-    ctx.fillText(viewMode === 'ascent' ? '±20,000 km' : '±460,000 km', 10, H - 10);
-    if (closestMoon && viewMode !== 'ascent') {
+    ctx.fillText(view === 'ascent' ? '±20,000 km' : '±460,000 km', 10, H - 10);
+    if (closestMoon && view !== 'ascent') {
       ctx.fillText(`Closest lunar approach: ${closestMoon.alt.toLocaleString()} km alt`, 10, H - 24);
     }
 
-  }, [simTime, trajectory, viewMode, closestMoon]);
+  }, [trajectory, closestMoon]);
 
-  const fmt = (sec) => {
-    const s = Math.floor(sec);
-    if (s < 60)    return `T+${s}s`;
-    if (s < 3600)  return `T+${Math.floor(s/60)}m ${s%60}s`;
-    if (s < 86400) return `T+${Math.floor(s/3600)}h ${Math.floor((s%3600)/60)}m`;
-    return `T+${Math.floor(s/86400)}d ${Math.floor((s%86400)/3600)}h`;
-  };
-
-  const tNow = Math.max(0, Math.min(simTime, T_END));
-
-  const box = {
-    background: 'rgba(255,255,255,0.04)',
-    border: '1px solid rgba(255,255,255,0.09)',
-    borderRadius: '12px',
-  };
-
-  const btn = (active, onClick, children, extra = {}) => (
-    <button onClick={onClick} style={{
-      padding: '6px 14px', borderRadius: '7px', border: 'none', cursor: 'pointer',
-      fontSize: '12px', fontFamily: 'monospace',
-      background: active ? extra.activeBg || '#1d4ed8' : '#1f2937',
-      color: active ? extra.activeColor || '#ffffff' : '#6b7280',
-      ...extra.style,
-    }}>{children}</button>
+  // Legend body — depends on the active view (rocket stack vs. orbital trail).
+  const legend = (view) => view === 'rocket' ? (
+    <React.Fragment>
+      <div style={eyebrow}>SLS Block 1 Stack</div>
+      <div style={{ display:'flex', flexDirection:'column', gap:'7px' }}>
+        {[
+          ['#cf3b2a','Launch Abort System'],
+          ['#dfe3e8','Orion (crew + ESM)'],
+          ['#c8ccd2','ICPS — RL-10'],
+          ['#d97a32','Core stage — 4× RS-25'],
+          ['#f0f0f4','Solid Rocket Boosters'],
+        ].map(([color, label]) => (
+          <div key={label} style={{ display:'flex', alignItems:'center', gap:'8px' }}>
+            <div style={{ width:'12px', height:'12px', borderRadius:'50%', background:color, flexShrink:0 }} />
+            <span style={{ fontSize:'11px', color:'#9ca3af' }}>{label}</span>
+          </div>
+        ))}
+      </div>
+      <div style={{ fontSize:'10px', color:'#5b616b', marginTop:'12px', lineHeight:'1.5' }}>
+        Drawn true-to-scale: the altitude grid matches the rocket's real size, and
+        the camera dollies out as it climbs. At 1× the launch runs in real time.
+        Spent stages tumble away as they separate.
+      </div>
+    </React.Fragment>
+  ) : (
+    <TrailLegend items={[
+      ['#ff9428','SRB phase'],
+      ['#ffd040','Core stage'],
+      ['#38aaff','Parking orbit'],
+      ['#d848ff','TLI burn'],
+      ['#44ff7a','Cislunar coast'],
+      ['#ffdd44','Lunar flyby zone'],
+      ['#ff5555','Return arc'],
+    ]} />
   );
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
-      {/* Canvas */}
-      <canvas ref={canvasRef} width={900} height={520}
-        style={{ width: '100%', borderRadius: '12px', background: '#05050f', display: 'block' }} />
-      {!trajectory && <div style={{ textAlign:'center', color:'#6b7280', padding:'12px' }}>Computing trajectory…</div>}
-
-      {/* Controls */}
-      <div style={{ ...box, padding: '14px', display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '10px' }}>
-        <button onClick={() => setPlaying(p => !p)} disabled={!trajectory} style={{
-          padding: '8px 22px', borderRadius: '8px', border: 'none', cursor: 'pointer',
-          background: playing ? '#374151' : '#2563eb', color: '#fff', fontWeight: '600', fontSize: '14px',
-        }}>{playing ? '⏸ Pause' : '▶ Play'}</button>
-
-        <button onClick={() => { setSimTime(0); setPlaying(false); }} style={{
-          padding: '8px 14px', borderRadius: '8px', border: 'none', cursor: 'pointer',
-          background: '#1f2937', color: '#9ca3af', fontSize: '13px',
-        }}>↺ Reset</button>
-
-        <div style={{ display:'flex', alignItems:'center', gap:'5px', color:'#9ca3af', fontSize:'12px' }}>
-          <span>Speed:</span>
-          {[1, 10, 100, 1000, 10000, 60000].map(s => (
-            <React.Fragment key={s}>
-              {btn(speed === s, () => setSpeed(s), s >= 1000 ? `${s / 1000}k×` : `${s}×`)}
-            </React.Fragment>
-          ))}
-          <span style={{ fontSize:'10px', color:'#5b616b' }}>(1× = real time)</span>
-        </div>
-
-        <div style={{ display:'flex', alignItems:'center', gap:'5px', color:'#9ca3af', fontSize:'12px' }}>
-          <span>View:</span>
-          {btn(viewMode==='rocket', () => setViewMode('rocket'), 'Rocket', { activeBg:'#065f46', activeColor:'#6ee7b7' })}
-          {btn(viewMode==='ascent', () => setViewMode('ascent'), 'Orbit', { activeBg:'#065f46', activeColor:'#6ee7b7' })}
-          {btn(viewMode==='cislunar', () => setViewMode('cislunar'), 'Cislunar', { activeBg:'#065f46', activeColor:'#6ee7b7' })}
-        </div>
-
-        <input type="range" min={0} max={T_END} step={1} value={tNow}
-          onChange={e => { setSimTime(Number(e.target.value)); setPlaying(false); }}
-          style={{ flex: 1, minWidth: '80px', accentColor: '#2563eb' }} />
-      </div>
-
-      {/* Status */}
-      <div style={{ ...box, padding:'16px', display:'grid', gridTemplateColumns:'160px 1fr 2fr', gap:'20px' }}>
-        <div>
-          <div style={{ fontSize:'10px', color:'#6b7280', textTransform:'uppercase', letterSpacing:'0.08em', marginBottom:'4px' }}>Mission Time</div>
-          <div style={{ fontSize:'20px', fontFamily:'monospace', fontWeight:'700', color:'#60a5fa' }}>{fmt(tNow)}</div>
-        </div>
-        <div>
-          <div style={{ fontSize:'10px', color:'#6b7280', textTransform:'uppercase', letterSpacing:'0.08em', marginBottom:'4px' }}>Phase</div>
-          <div style={{ fontSize:'15px', fontWeight:'600', color:'#f3f4f6' }}>{currentPhase.label}</div>
-        </div>
-        <div>
-          <div style={{ fontSize:'10px', color:'#6b7280', textTransform:'uppercase', letterSpacing:'0.08em', marginBottom:'4px' }}>Status</div>
-          <div style={{ fontSize:'12px', color:'#9ca3af', lineHeight:'1.55' }}>{currentPhase.desc}</div>
-        </div>
-      </div>
-
-      {/* Timeline + Legend */}
-      <div style={{ display:'grid', gridTemplateColumns:'1fr 190px', gap:'12px' }}>
-        <div style={{ ...box, padding:'16px' }}>
-          <div style={{ fontSize:'10px', color:'#6b7280', textTransform:'uppercase', letterSpacing:'0.08em', marginBottom:'10px' }}>
-            Mission Timeline — click to jump
-          </div>
-          <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:'2px' }}>
-            {PHASES.map(ph => {
-              const past   = tNow >= ph.t;
-              const active = ph.id === currentPhase.id;
-              return (
-                <button key={ph.id} onClick={() => { setSimTime(ph.t); setPlaying(false); }} style={{
-                  display:'flex', alignItems:'center', gap:'7px',
-                  padding:'6px 8px', borderRadius:'6px', border:'none', textAlign:'left', cursor:'pointer',
-                  background: active ? 'rgba(37,99,235,0.18)' : 'transparent',
-                  outline: active ? '1px solid rgba(37,99,235,0.4)' : 'none',
-                }}>
-                  <span style={{
-                    width:'7px', height:'7px', borderRadius:'50%', flexShrink:0, display:'block',
-                    background: active ? '#60a5fa' : past ? '#34d399' : '#374151',
-                  }} />
-                  <span style={{ flex:1, fontSize:'12px', color: active ? '#93c5fd' : past ? '#6ee7b7' : '#6b7280' }}>
-                    {ph.label}
-                  </span>
-                  <span style={{ fontSize:'9px', color:'#4b5563', fontFamily:'monospace' }}>{fmt(ph.t)}</span>
-                </button>
-              );
-            })}
-          </div>
-        </div>
-
-        <div style={{ ...box, padding:'16px' }}>
-          <div style={{ fontSize:'10px', color:'#6b7280', textTransform:'uppercase', letterSpacing:'0.08em', marginBottom:'10px' }}>
-            {viewMode === 'rocket' ? 'SLS Block 1 Stack' : 'Trail Colors'}
-          </div>
-          <div style={{ display:'flex', flexDirection:'column', gap:'7px' }}>
-            {(viewMode === 'rocket'
-              ? [
-                  ['#cf3b2a','Launch Abort System'],
-                  ['#dfe3e8','Orion (crew + ESM)'],
-                  ['#c8ccd2','ICPS — RL-10'],
-                  ['#d97a32','Core stage — 4× RS-25'],
-                  ['#f0f0f4','Solid Rocket Boosters'],
-                ]
-              : [
-                  ['#ff9428','SRB phase'],
-                  ['#ffd040','Core stage'],
-                  ['#38aaff','Parking orbit'],
-                  ['#d848ff','TLI burn'],
-                  ['#44ff7a','Cislunar coast'],
-                  ['#ffdd44','Lunar flyby zone'],
-                  ['#ff5555','Return arc'],
-                ]
-            ).map(([color, label]) => (
-              <div key={label} style={{ display:'flex', alignItems:'center', gap:'8px' }}>
-                <div style={{ width: viewMode==='rocket' ? '12px' : '22px', height: viewMode==='rocket' ? '12px' : '3px',
-                  borderRadius: viewMode==='rocket' ? '50%' : '2px', background:color, flexShrink:0 }} />
-                <span style={{ fontSize:'11px', color:'#9ca3af' }}>{label}</span>
-              </div>
-            ))}
-          </div>
-          {viewMode === 'rocket' && (
-            <div style={{ fontSize:'10px', color:'#5b616b', marginTop:'12px', lineHeight:'1.5' }}>
-              Drawn true-to-scale: the altitude grid matches the rocket's real
-              size, and the camera dollies out as it climbs. At 1× the launch
-              runs in real time. Spent stages tumble away as they separate.
-            </div>
-          )}
-        </div>
-      </div>
-    </div>
+    <RocketrySim
+      phases={PHASES} tEnd={T_END} draw={draw} ready={!!trajectory}
+      views={[{ id:'rocket', label:'Rocket' }, { id:'ascent', label:'Orbit' }, { id:'cislunar', label:'Cislunar' }]}
+      defaultView="rocket"
+      speeds={[1, 10, 100, 1000, 10000, 60000]} defaultSpeed={1}
+      speedNote="(1× = real time)"
+      legend={legend}
+    />
   );
 }
