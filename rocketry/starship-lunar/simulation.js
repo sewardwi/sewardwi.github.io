@@ -421,6 +421,1343 @@ function generateTrajectory() {
 }
 
 // ════════════════════════════════════════════════════════════════════════════
+// ROCKET VIEW — Starship / Super Heavy vehicle profile
+// ════════════════════════════════════════════════════════════════════════════
+// Vehicle-centric side-profile animation, styled after the Artemis II rocket
+// view. The stack holds near screen centre; altitude tape + ground scroll;
+// gravity-turn tilt; booster tumbles away at hot staging.
+//
+// Art-space convention: origin at the booster engine gimbal plane (bottom of
+// the full stack). -y = up the stack; +y = engine exhaust direction.
+// Units: art pixels. ART_PX = total height from nozzle exit to nosecone tip.
+
+// Plume helper — not in sim-core.js, so defined here.
+function drawPlume(ctx, x, yTop, width, length, colors, clock, seed) {
+  const flick = 0.78 + 0.22 * Math.sin(clock * 1.9 + seed) * Math.cos(clock * 0.7 + seed * 2);
+  const L = length * (0.85 + 0.15 * flick);
+  const g = ctx.createLinearGradient(0, yTop, 0, yTop + L);
+  g.addColorStop(0,    colors[0]);
+  g.addColorStop(0.45, colors[1]);
+  g.addColorStop(1,    colors[2]);
+  ctx.fillStyle = g;
+  ctx.beginPath();
+  ctx.moveTo(x - width / 2, yTop);
+  ctx.lineTo(x + width / 2, yTop);
+  ctx.lineTo(x + width * 0.12, yTop + L);
+  ctx.lineTo(x - width * 0.12, yTop + L);
+  ctx.closePath();
+  ctx.fill();
+}
+
+// ── Ascent keyframes (altitude km, velocity km/s vs mission time s) ───────────
+const SS_ASCENT_KEYS = [
+  [0,             0.0,    0.00],
+  [T_MAXQ,        12,     0.45],
+  [T_HOT_STAGE,   68,     1.60],
+  [300,           120,    4.50],
+  [T_SHIP_MECO,   150,    7.20],
+  [T_LEO_INSERT,  LEO_ALT, V_LEO],
+];
+
+function ssAscentState(t) {
+  const K = SS_ASCENT_KEYS;
+  if (t <= K[0][0]) return { alt: K[0][1], vel: K[0][2] };
+  for (let i = 0; i < K.length - 1; i++) {
+    if (t <= K[i+1][0]) {
+      const [t0,a0,v0] = K[i], [t1,a1,v1] = K[i+1];
+      const f = (t-t0)/(t1-t0);
+      return { alt: a0+f*(a1-a0), vel: v0+f*(v1-v0) };
+    }
+  }
+  return { alt: LEO_ALT, vel: V_LEO };
+}
+
+// Altitude above Earth (km) + speed (km/s) at any mission time.
+function starshipMissionState(t) {
+  if (t <= T_LEO_INSERT) return ssAscentState(t);
+  if (t < T_TLI) return { alt: LEO_ALT, vel: V_LEO };
+  if (t <= T_LOI) {
+    const p = tliEllipsePos(t - T_TLI);
+    const r = Math.hypot(p.x, p.y);
+    return { alt: r - R_EARTH, vel: Math.sqrt(MU_EARTH * (2/r - 1/A_TLI)) };
+  }
+  // Lunar phases: use vehiclePos for Earth-relative distance
+  const vp = vehiclePos(t);
+  const r   = Math.hypot(vp.x, vp.y);
+  const rM  = Math.hypot(vp.x - vp.moon.x, vp.y - vp.moon.y);
+  let vel;
+  if      (t <= T_DOI)        vel = Math.sqrt(MU_MOON * (2/rM - 1/NRHO_A));
+  else if (t <= T_LANDING)    vel = 1.8 * Math.max(0, 1 - (t-T_DOI)/(T_LANDING-T_DOI));
+  else if (t <= T_SURFACE_END) vel = 0;
+  else if (t <= T_NRHO_RV)    vel = 1.8 * (t-T_SURFACE_END)/(T_NRHO_RV-T_SURFACE_END);
+  else                        vel = Math.sqrt(MU_MOON * (2/rM - 1/NRHO_A));
+  return { alt: r - R_EARTH, vel };
+}
+
+// ── Vehicle art dimensions ────────────────────────────────────────────────────
+const SSHIP = {
+  // Super Heavy booster (y=0 at engine gimbal → y=-228 at top)
+  boosterW:    30,
+  boosterTop:  -228,
+  // Hot staging ring (sits on top of booster, part of booster stack)
+  hstageW:     36,
+  hstageTop:   -246,   // top of ring
+  // Starship ship body
+  shipW:       28,
+  shipBottom:  -258,   // bottom of ship (above ring gap)
+  shipBodyTop: -400,   // where nosecone taper begins
+  shipNoseTip: -440,   // nosecone tip
+  // Aft flaps (large delta wings near ship bottom, one per side)
+  aftFlapBotY: -270,
+  aftFlapTopY: -316,
+  aftFlapSpan: 26,
+  // Forward canards (smaller, near nosecone)
+  fwdFlapBotY: -382,
+  fwdFlapTopY: -400,
+  fwdFlapSpan: 14,
+};
+
+// ── Plume helper (re-declared local so it doesn't collide with SLS version) ───
+// The sim-core version is defined globally; we reuse it directly (drawPlume).
+
+function drawSSBooster(ctx, burning, flick) {
+  const S = SSHIP;
+  if (burning) {
+    // 33-Raptor plume: wide + bright core
+    drawPlume(ctx, 0, 10, 34, 210,
+      ['rgba(255,248,200,0.95)', 'rgba(255,145,30,0.75)', 'rgba(255,50,5,0)'], flick, 0);
+    drawPlume(ctx, 0, 10, 11, 265,
+      ['rgba(255,255,255,0.95)', 'rgba(210,228,255,0.5)', 'rgba(210,228,255,0)'], flick, 8);
+  }
+  // Engine nozzle cluster (5 visible from side)
+  ctx.fillStyle = '#1c1e22';
+  for (const ex of [-12, -6, 0, 6, 12]) {
+    ctx.beginPath();
+    ctx.moveTo(ex-2.5, 0); ctx.lineTo(ex+2.5, 0);
+    ctx.lineTo(ex+4,   10); ctx.lineTo(ex-4,   10);
+    ctx.closePath(); ctx.fill();
+  }
+  // Thrust structure (slight flare at base)
+  ctx.fillStyle = '#2a2c30';
+  ctx.beginPath();
+  ctx.moveTo(-S.boosterW/2-3, 0); ctx.lineTo(S.boosterW/2+3, 0);
+  ctx.lineTo( S.boosterW/2, -16); ctx.lineTo(-S.boosterW/2, -16);
+  ctx.closePath(); ctx.fill();
+  // Stainless steel body
+  const bg = ctx.createLinearGradient(-S.boosterW/2, 0, S.boosterW/2, 0);
+  bg.addColorStop(0,   '#686a70');
+  bg.addColorStop(0.35,'#b8bcc2');
+  bg.addColorStop(0.62,'#d8dce2');
+  bg.addColorStop(1,   '#5e6068');
+  ctx.fillStyle = bg;
+  ctx.fillRect(-S.boosterW/2, S.boosterTop, S.boosterW, -16 - S.boosterTop);
+  // Weld ring details
+  ctx.strokeStyle = 'rgba(70,72,82,0.45)';
+  ctx.lineWidth = 1.2;
+  for (const wy of [-50, -100, -150, -200]) {
+    ctx.beginPath();
+    ctx.moveTo(-S.boosterW/2, wy); ctx.lineTo(S.boosterW/2, wy); ctx.stroke();
+  }
+  // Grid fins (2 visible, near top)
+  const gfY = S.boosterTop + 8, gfH = 28, gfW = 14;
+  ctx.fillStyle = '#80838a';
+  ctx.fillRect(-S.boosterW/2 - gfW, gfY, gfW, gfH);
+  ctx.fillRect( S.boosterW/2,       gfY, gfW, gfH);
+  ctx.strokeStyle = 'rgba(30,32,36,0.5)'; ctx.lineWidth = 1;
+  for (let i = 1; i < 3; i++) {
+    const gy = gfY + i * gfH / 3;
+    ctx.beginPath(); ctx.moveTo(-S.boosterW/2-gfW, gy); ctx.lineTo(-S.boosterW/2, gy); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo( S.boosterW/2,     gy); ctx.lineTo( S.boosterW/2+gfW, gy); ctx.stroke();
+  }
+  ctx.beginPath(); ctx.moveTo(-S.boosterW/2-gfW/2, gfY); ctx.lineTo(-S.boosterW/2-gfW/2, gfY+gfH); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo( S.boosterW/2+gfW/2, gfY); ctx.lineTo( S.boosterW/2+gfW/2, gfY+gfH); ctx.stroke();
+  // Hot staging ring at top of booster
+  const hg = ctx.createLinearGradient(-S.hstageW/2, 0, S.hstageW/2, 0);
+  hg.addColorStop(0, '#48494f'); hg.addColorStop(0.5, '#80838a'); hg.addColorStop(1, '#40424a');
+  ctx.fillStyle = hg;
+  ctx.fillRect(-S.hstageW/2, S.boosterTop, S.hstageW, S.hstageTop - S.boosterTop);
+  // Vent slots on ring
+  ctx.fillStyle = 'rgba(14,14,18,0.7)';
+  for (const vx of [-12, -4, 4, 12]) {
+    ctx.fillRect(vx - 2, S.boosterTop + 2, 4, 10);
+  }
+}
+
+function drawSSShip(ctx, burning, flick) {
+  const S = SSHIP;
+  // Ship Raptor nozzles and plumes (engines at ship bottom, plume extends downward = +y)
+  if (burning) {
+    drawPlume(ctx, 0, S.shipBottom+9, 18, 110,
+      ['rgba(200,218,255,0.9)', 'rgba(140,172,255,0.5)', 'rgba(140,172,255,0)'], flick, 4);
+    drawPlume(ctx, 0, S.shipBottom+9, 6,  140,
+      ['rgba(255,255,255,0.95)', 'rgba(200,218,255,0.4)', 'rgba(200,218,255,0)'], flick, 11);
+  }
+  // 3 sea-level Raptors (center)
+  ctx.fillStyle = '#202226';
+  for (const ex of [-9, 0, 9]) {
+    ctx.beginPath();
+    ctx.moveTo(ex-2, S.shipBottom+2); ctx.lineTo(ex+2, S.shipBottom+2);
+    ctx.lineTo(ex+3.5, S.shipBottom+11); ctx.lineTo(ex-3.5, S.shipBottom+11);
+    ctx.closePath(); ctx.fill();
+  }
+  // 2 vacuum Raptors (wider bell, outer)
+  ctx.fillStyle = '#181a1e';
+  for (const ex of [-16, 16]) {
+    ctx.beginPath();
+    ctx.moveTo(ex-2, S.shipBottom+2); ctx.lineTo(ex+2, S.shipBottom+2);
+    ctx.lineTo(ex+5.5, S.shipBottom+13); ctx.lineTo(ex-5.5, S.shipBottom+13);
+    ctx.closePath(); ctx.fill();
+  }
+  // Ship body (stainless steel)
+  const sg = ctx.createLinearGradient(-S.shipW/2, 0, S.shipW/2, 0);
+  sg.addColorStop(0,   '#686a70');
+  sg.addColorStop(0.3, '#b8bcc2');
+  sg.addColorStop(0.62,'#d8dce2');
+  sg.addColorStop(1,   '#5e6068');
+  ctx.fillStyle = sg;
+  ctx.fillRect(-S.shipW/2, S.shipBodyTop, S.shipW, S.shipBottom - S.shipBodyTop);
+  // Weld rings
+  ctx.strokeStyle = 'rgba(70,72,82,0.4)'; ctx.lineWidth = 1.2;
+  for (const wy of [-278, -308, -338, -368]) {
+    ctx.beginPath(); ctx.moveTo(-S.shipW/2, wy); ctx.lineTo(S.shipW/2, wy); ctx.stroke();
+  }
+  // Aft flaps (large delta wings)
+  const af = (sign) => {
+    ctx.beginPath();
+    ctx.moveTo(sign * S.shipW/2, S.aftFlapBotY);
+    ctx.lineTo(sign * (S.shipW/2 + S.aftFlapSpan), (S.aftFlapBotY + S.aftFlapTopY) / 2);
+    ctx.lineTo(sign * S.shipW/2, S.aftFlapTopY);
+    ctx.closePath(); ctx.fill();
+  };
+  ctx.fillStyle = '#64666c';
+  af(1); af(-1);
+  // Forward canards
+  const fc = (sign) => {
+    ctx.beginPath();
+    ctx.moveTo(sign * S.shipW/2, S.fwdFlapBotY);
+    ctx.lineTo(sign * (S.shipW/2 + S.fwdFlapSpan), (S.fwdFlapBotY + S.fwdFlapTopY) / 2);
+    ctx.lineTo(sign * S.shipW/2, S.fwdFlapTopY);
+    ctx.closePath(); ctx.fill();
+  };
+  ctx.fillStyle = '#787a80';
+  fc(1); fc(-1);
+  // Nosecone
+  const ng = ctx.createLinearGradient(-S.shipW/2, 0, S.shipW/2, 0);
+  ng.addColorStop(0,   '#5c5e64');
+  ng.addColorStop(0.38,'#b0b4ba');
+  ng.addColorStop(0.65,'#ccd0d6');
+  ng.addColorStop(1,   '#545658');
+  ctx.fillStyle = ng;
+  ctx.beginPath();
+  ctx.moveTo(-S.shipW/2, S.shipBodyTop);
+  ctx.lineTo( S.shipW/2, S.shipBodyTop);
+  ctx.lineTo(0, S.shipNoseTip);
+  ctx.closePath(); ctx.fill();
+  // Header-tank dome (small bulge just below nosecone)
+  ctx.fillStyle = 'rgba(96,100,112,0.55)';
+  ctx.beginPath();
+  ctx.arc(0, S.shipBodyTop + 10, S.shipW * 0.35, 0, Math.PI * 2);
+  ctx.fill();
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// ROCKET-VIEW SCENES — orbital refueling + lunar surface operations
+// ════════════════════════════════════════════════════════════════════════════
+// Once the stack leaves the atmosphere the true-to-scale camera dollies it down
+// to a marker. To keep the rocket view interesting through the long mid-mission
+// phases, two dedicated scenes take over the canvas: the LEO tanker-refueling
+// depot, and the lunar landing → surface-operations → ascent sequence.
+
+function fmtAltKm(a) {
+  return a < 1    ? Math.round(a * 1000) + ' m'
+       : a < 100  ? a.toFixed(1) + ' km'
+       : a < 1000 ? Math.round(a) + ' km'
+       : a < 1e6  ? (a / 1000).toFixed(a < 1e4 ? 1 : 0) + 'k km'
+       :            (a / 1e6).toFixed(2) + 'M km';
+}
+
+function sceneStars(ctx, W, H, n) {
+  for (let i = 0; i < n; i++) {
+    const sx = ((Math.sin(i * 7.31 + 0.4) + 1) / 2) * W;
+    const sy = ((Math.cos(i * 13.71 + 1.1) + 1) / 2) * H;
+    const br = 0.18 + 0.7 * ((i * 37 % 100) / 100);
+    ctx.fillStyle = `rgba(255,255,255,${br.toFixed(2)})`;
+    ctx.fillRect(sx, sy, i % 9 === 0 ? 2 : 1, i % 9 === 0 ? 2 : 1);
+  }
+}
+
+function drawScenePanel(ctx, x, y, w, h) {
+  ctx.fillStyle = 'rgba(8,10,20,0.62)';
+  ctx.strokeStyle = 'rgba(255,255,255,0.08)'; ctx.lineWidth = 1;
+  ctx.beginPath();
+  if (ctx.roundRect) ctx.roundRect(x, y, w, h, 8); else ctx.rect(x, y, w, h);
+  ctx.fill(); ctx.stroke();
+}
+
+// Big curved Earth limb across the bottom (LEO refuel scene).
+function drawEarthLimbBottom(ctx, W, H) {
+  const R  = W * 1.7;
+  const cx = W * 0.5, cy = H + R - H * 0.20;
+  const ag = ctx.createRadialGradient(cx, cy, R, cx, cy, R + 70);
+  ag.addColorStop(0, 'rgba(120,180,255,0.45)');
+  ag.addColorStop(1, 'rgba(120,180,255,0)');
+  ctx.fillStyle = ag;
+  ctx.beginPath(); ctx.arc(cx, cy, R + 70, 0, Math.PI * 2); ctx.fill();
+  const eg = ctx.createRadialGradient(cx - R * 0.3, cy - R * 0.25, R * 0.2, cx, cy, R);
+  eg.addColorStop(0, '#2f6fd0'); eg.addColorStop(0.7, '#1b4a93'); eg.addColorStop(1, '#0c2c5e');
+  ctx.fillStyle = eg;
+  ctx.beginPath(); ctx.arc(cx, cy, R, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = 'rgba(225,233,242,0.16)';
+  for (let i = 0; i < 7; i++) {
+    const a = -Math.PI / 2 + (i - 3) * 0.16;
+    const px = cx + Math.cos(a) * (R - 9), py = cy + Math.sin(a) * (R - 9);
+    ctx.beginPath(); ctx.ellipse(px, py, 28, 9, a, 0, Math.PI * 2); ctx.fill();
+  }
+}
+
+// Small Earth disk hanging in the black lunar sky.
+function drawEarthDiskSky(ctx, x, y, r) {
+  const gl = ctx.createRadialGradient(x, y, r, x, y, r + 9);
+  gl.addColorStop(0, 'rgba(120,170,255,0.4)'); gl.addColorStop(1, 'rgba(120,170,255,0)');
+  ctx.fillStyle = gl; ctx.beginPath(); ctx.arc(x, y, r + 9, 0, Math.PI * 2); ctx.fill();
+  const g = ctx.createRadialGradient(x - r * 0.3, y - r * 0.3, r * 0.15, x, y, r);
+  g.addColorStop(0, '#3a7fe0'); g.addColorStop(0.65, '#1d4f9b'); g.addColorStop(1, '#0a2550');
+  ctx.fillStyle = g; ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = 'rgba(220,235,245,0.22)';
+  ctx.beginPath(); ctx.ellipse(x - 2, y + 1, r * 0.6, r * 0.32, 0.5, 0, Math.PI * 2); ctx.fill();
+}
+
+// ── Unified Starship profile (origin at engine plane, nose up = -y) ───────────
+// variant 'tanker' → aft flaps + forward canards;
+// variant 'hls'    → solar-panel band, high-mounted landing thrusters, no flaps,
+//                    optional landing legs + crew elevator.
+function drawShip(ctx, opts) {
+  const o = opts || {};
+  const variant = o.variant || 'tanker';
+  const flick = o.flick || 0;
+  const W2 = 15, bodyTop = -150, noseTip = -186;
+
+  // Main-engine plume (ascent / boostback)
+  if (o.burning) {
+    drawPlume(ctx, 0, 11, 18, 122,
+      ['rgba(210,224,255,0.9)', 'rgba(150,180,255,0.5)', 'rgba(150,180,255,0)'], flick, 4);
+    drawPlume(ctx, 0, 11, 6, 152,
+      ['rgba(255,255,255,0.95)', 'rgba(210,224,255,0.4)', 'rgba(210,224,255,0)'], flick, 11);
+  }
+  // High-mounted landing-thruster plumes (HLS final descent) — angled down/out
+  if (o.thrusterBurn && variant === 'hls') {
+    for (const sgn of [-1, 1]) {
+      ctx.save();
+      ctx.translate(sgn * (W2 + 1), -104);
+      ctx.rotate(sgn * 0.42);
+      drawPlume(ctx, 0, 0, 9, 72,
+        ['rgba(225,236,255,0.95)', 'rgba(150,185,255,0.6)', 'rgba(150,185,255,0)'], flick, sgn * 3);
+      ctx.restore();
+    }
+  }
+  // Engines (3 SL + 2 vac)
+  if (o.engines !== false) {
+    ctx.fillStyle = '#202226';
+    for (const ex of [-9, 0, 9]) {
+      ctx.beginPath();
+      ctx.moveTo(ex - 2, 2); ctx.lineTo(ex + 2, 2);
+      ctx.lineTo(ex + 3.5, 11); ctx.lineTo(ex - 3.5, 11);
+      ctx.closePath(); ctx.fill();
+    }
+    ctx.fillStyle = '#181a1e';
+    for (const ex of [-15, 15]) {
+      ctx.beginPath();
+      ctx.moveTo(ex - 2, 2); ctx.lineTo(ex + 2, 2);
+      ctx.lineTo(ex + 5, 13); ctx.lineTo(ex - 5, 13);
+      ctx.closePath(); ctx.fill();
+    }
+  }
+  // Body (stainless steel)
+  const sg = ctx.createLinearGradient(-W2, 0, W2, 0);
+  sg.addColorStop(0, '#686a70'); sg.addColorStop(0.3, '#b8bcc2');
+  sg.addColorStop(0.62, '#d8dce2'); sg.addColorStop(1, '#5e6068');
+  ctx.fillStyle = sg;
+  ctx.fillRect(-W2, bodyTop, 2 * W2, -bodyTop);
+  // Weld rings
+  ctx.strokeStyle = 'rgba(70,72,82,0.4)'; ctx.lineWidth = 1.1;
+  for (let wy = -20; wy > bodyTop; wy -= 26) {
+    ctx.beginPath(); ctx.moveTo(-W2, wy); ctx.lineTo(W2, wy); ctx.stroke();
+  }
+
+  if (variant === 'tanker') {
+    const flap = (sgn, y0, y1, span) => {
+      ctx.beginPath();
+      ctx.moveTo(sgn * W2, y0);
+      ctx.lineTo(sgn * (W2 + span), (y0 + y1) / 2);
+      ctx.lineTo(sgn * W2, y1);
+      ctx.closePath(); ctx.fill();
+    };
+    ctx.fillStyle = '#64666c'; flap(1, -10, -46, 20); flap(-1, -10, -46, 20);
+    ctx.fillStyle = '#787a80'; flap(1, -120, -146, 11); flap(-1, -120, -146, 11);
+  } else {
+    // HLS solar-panel band near top
+    ctx.fillStyle = 'rgba(18,26,58,0.94)';
+    ctx.fillRect(-W2, -150, 2 * W2, 30);
+    ctx.strokeStyle = 'rgba(90,120,200,0.35)'; ctx.lineWidth = 0.8;
+    for (let pc = -W2 + 5; pc < W2; pc += 6) {
+      ctx.beginPath(); ctx.moveTo(pc, -150); ctx.lineTo(pc, -120); ctx.stroke();
+    }
+    ctx.beginPath(); ctx.moveTo(-W2, -135); ctx.lineTo(W2, -135); ctx.stroke();
+    // High-mounted landing-thruster pods
+    ctx.fillStyle = '#3a3c42';
+    ctx.fillRect(-W2 - 4, -110, 5, 12); ctx.fillRect(W2 - 1, -110, 5, 12);
+  }
+
+  // Nosecone
+  const ng = ctx.createLinearGradient(-W2, 0, W2, 0);
+  ng.addColorStop(0, '#5c5e64'); ng.addColorStop(0.4, '#b0b4ba');
+  ng.addColorStop(0.66, '#ccd0d6'); ng.addColorStop(1, '#545658');
+  ctx.fillStyle = ng;
+  ctx.beginPath();
+  ctx.moveTo(-W2, bodyTop); ctx.lineTo(W2, bodyTop); ctx.lineTo(0, noseTip);
+  ctx.closePath(); ctx.fill();
+
+  // Landing legs (HLS)
+  if (variant === 'hls' && o.legs > 0) {
+    const d = Math.min(1, o.legs);
+    ctx.strokeStyle = '#9498a0'; ctx.lineWidth = 3; ctx.lineCap = 'round';
+    for (const sgn of [-1, 1]) {
+      const footX = sgn * (10 + 20 * d), footY = 7 * d;
+      ctx.beginPath(); ctx.moveTo(sgn * W2 * 0.6, -12); ctx.lineTo(footX, footY); ctx.stroke();
+      ctx.fillStyle = '#9498a0'; ctx.fillRect(footX - 5, footY - 1, 10, 3);
+    }
+    ctx.lineCap = 'butt';
+  }
+  // Crew elevator (HLS)
+  if (variant === 'hls' && o.elevator > 0) {
+    const hatchY = -54, platY = hatchY + o.elevator * 52, platX = -W2 - 11;
+    ctx.strokeStyle = 'rgba(184,188,194,0.7)'; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(-W2, hatchY); ctx.lineTo(platX + 10, platY); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(-W2, hatchY); ctx.lineTo(platX, platY); ctx.stroke();
+    ctx.fillStyle = 'rgba(10,12,16,0.85)'; ctx.fillRect(-W2 - 1, hatchY - 7, 3, 14);
+    ctx.fillStyle = '#c2c6cc'; ctx.fillRect(platX - 2, platY, 16, 3);
+  }
+}
+
+// ── LEO orbital refueling scene ───────────────────────────────────────────────
+function drawRefuelScene(ctx, W, H, t) {
+  const flick = performance.now() / 1000;
+  ctx.fillStyle = '#03030a'; ctx.fillRect(0, 0, W, H);
+  sceneStars(ctx, W, H, 220);
+  drawEarthLimbBottom(ctx, W, H);
+
+  // Illustrative cadence: keep a tanker docked for most of each delivery cycle so
+  // the refuelling is visible whenever the clock sits anywhere in the campaign.
+  const campaign  = t >= T_TANKER_BEGIN && t < T_TANKER_END;
+  const cycle     = (T_TANKER_END - T_TANKER_BEGIN) / N_TANKERS;
+  const cyclePos  = campaign ? ((t - T_TANKER_BEGIN) % cycle) / cycle : 0;
+  const docked    = campaign && cyclePos < 0.86;
+  const approach  = (campaign && !docked) || (t >= T_LEO_INSERT && t < T_TANKER_BEGIN);
+  const xferFrac  = docked ? cyclePos / 0.86 : 0;
+  const tankerNum = campaign ? Math.min(N_TANKERS, Math.floor((t - T_TANKER_BEGIN) / cycle) + 1) : 0;
+  const prog      = t >= T_TANKER_END ? 1 : campaign ? (t - T_TANKER_BEGIN) / (T_TANKER_END - T_TANKER_BEGIN) : 0;
+  const fillFrac  = Math.max(0, Math.min(1, prog));
+
+  const cx = W * 0.40, joinY = H * 0.46, s = 0.82, BW = 15 * s;
+  const bodyTopY = joinY - 150 * s;       // depot body top (art -150)
+  const noseTopY = joinY - 186 * s;       // depot nose tip
+
+  // Depot tank fill (settled against the aft/join — grows upward over campaign)
+  ctx.fillStyle = 'rgba(90,200,255,0.26)';
+  ctx.fillRect(cx - BW, joinY - 150 * s * fillFrac, 2 * BW, 150 * s * fillFrac);
+
+  // Depot (HLS) above the join, nose up
+  ctx.save();
+  ctx.translate(cx, joinY); ctx.scale(s, s);
+  drawShip(ctx, { variant: 'hls', engines: !docked, flick });
+  ctx.restore();
+
+  if (docked) {
+    // Tanker remaining propellant (settled against the join — drains downward)
+    ctx.fillStyle = 'rgba(90,200,255,0.22)';
+    ctx.fillRect(cx - BW, joinY, 2 * BW, 150 * s * (1 - xferFrac));
+    // Tanker below the join, inverted (nose down), aft-to-aft
+    ctx.save();
+    ctx.translate(cx, joinY); ctx.scale(s, -s);
+    drawShip(ctx, { variant: 'tanker', engines: false, flick });
+    ctx.restore();
+    // Docking collar
+    ctx.fillStyle = '#34363c'; ctx.fillRect(cx - 20 * s, joinY - 9, 40 * s, 18);
+    ctx.fillStyle = 'rgba(0,0,0,0.4)'; ctx.fillRect(cx - 20 * s, joinY - 1, 40 * s, 2);
+    // Transfer glow + flowing propellant droplets (tanker → depot)
+    const fg = ctx.createRadialGradient(cx, joinY, 0, cx, joinY, 22);
+    fg.addColorStop(0, 'rgba(120,210,255,0.5)'); fg.addColorStop(1, 'rgba(120,210,255,0)');
+    ctx.fillStyle = fg; ctx.beginPath(); ctx.arc(cx, joinY, 22, 0, Math.PI * 2); ctx.fill();
+    for (let i = 0; i < 5; i++) {
+      const ph = (flick * 0.8 + i / 5) % 1;
+      const yy = joinY + 18 - ph * 36;
+      ctx.fillStyle = `rgba(150,220,255,${(0.8 * (1 - Math.abs(ph - 0.5) * 1.4)).toFixed(2)})`;
+      ctx.beginPath(); ctx.arc(cx + Math.sin(i * 2.1) * 3, yy, 1.8, 0, Math.PI * 2); ctx.fill();
+    }
+    // Settling RCS puffs at the depot nose
+    const pn = (Math.sin(flick * 3) + 1) / 2;
+    ctx.fillStyle = `rgba(220,235,255,${(0.25 + 0.25 * pn).toFixed(2)})`;
+    ctx.beginPath(); ctx.arc(cx - BW - 4, bodyTopY + 22, 2 + pn * 1.5, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(cx + BW + 4, bodyTopY + 22, 2 + pn * 1.5, 0, Math.PI * 2); ctx.fill();
+    // Labels
+    ctx.fillStyle = 'rgba(200,210,225,0.6)'; ctx.font = '9px monospace';
+    ctx.fillText('TANKER', cx - 18, joinY + 188 * s + 12);
+  } else if (approach) {
+    // Next tanker climbing from Earth toward the depot
+    const bob = (Math.sin(flick * 0.6) + 1) / 2;
+    const tx = W * 0.66, ty = H * 0.74 - bob * 12;
+    ctx.save(); ctx.translate(tx, ty); ctx.scale(0.34, 0.34);
+    drawShip(ctx, { variant: 'tanker', burning: true, flick });
+    ctx.restore();
+    ctx.fillStyle = 'rgba(175,192,212,0.7)'; ctx.font = '9px monospace';
+    ctx.fillText('tanker inbound', tx - 32, ty + 30);
+  }
+
+  ctx.fillStyle = 'rgba(200,210,225,0.6)'; ctx.font = '9px monospace';
+  ctx.fillText('HLS DEPOT', cx - 26, noseTopY - 6);
+
+  // ── Readout panel ──
+  const px = 14, py = 14;
+  drawScenePanel(ctx, px, py, 232, 150);
+  ctx.fillStyle = '#6b7280'; ctx.font = '9px monospace';
+  ctx.fillText('ALTITUDE', px + 14, py + 22);
+  ctx.fillText('VELOCITY', px + 126, py + 22);
+  ctx.fillStyle = '#60a5fa'; ctx.font = 'bold 19px monospace';
+  ctx.fillText('300 km', px + 14, py + 42);
+  ctx.fillStyle = '#34d399'; ctx.font = 'bold 19px monospace';
+  ctx.fillText('7.73', px + 126, py + 42);
+  ctx.fillStyle = '#6b7280'; ctx.font = '9px monospace';
+  ctx.fillText('km/s', px + 170, py + 42);
+  ctx.strokeStyle = 'rgba(255,255,255,0.08)';
+  ctx.beginPath(); ctx.moveTo(px + 12, py + 54); ctx.lineTo(px + 220, py + 54); ctx.stroke();
+  ctx.fillStyle = '#6b7280'; ctx.font = '9px monospace';
+  ctx.fillText('ORBITAL REFUELING', px + 14, py + 70);
+
+  let statusMain, statusSub;
+  if (docked)        { statusMain = `Tanker ${tankerNum} of ~${N_TANKERS} docked`;            statusSub = 'Cryo methalox transfer · aft-to-aft'; }
+  else if (prog >= 1){ statusMain = 'Refueling complete';                                    statusSub = 'Full load · preparing for TLI'; }
+  else if (campaign) { statusMain = `Tanker ${Math.min(N_TANKERS, tankerNum + 1)} inbound`;  statusSub = 'Previous tanker departing · depot venting'; }
+  else               { statusMain = 'Awaiting tanker fleet';                                 statusSub = 'Depot holding attitude · sun-shaded'; }
+  ctx.fillStyle = '#e5e7eb'; ctx.font = '11px monospace'; ctx.fillText(statusMain, px + 14, py + 88);
+  ctx.fillStyle = '#5b616b'; ctx.font = '9px monospace';  ctx.fillText(statusSub, px + 14, py + 102);
+  ctx.fillStyle = '#9ca3af'; ctx.font = '10px monospace';
+  ctx.fillText(`Depot load: ${Math.round(fillFrac * PROP_SHIP)} / ${PROP_SHIP} t`, px + 14, py + 122);
+  ctx.fillStyle = 'rgba(255,255,255,0.1)'; ctx.fillRect(px + 14, py + 130, 204, 7);
+  ctx.fillStyle = '#50c8ff'; ctx.fillRect(px + 14, py + 130, 204 * fillFrac, 7);
+
+  ctx.fillStyle = 'rgba(180,190,210,0.55)'; ctx.font = '9px monospace';
+  ctx.fillText('LOW EARTH ORBIT · ~300 km', 14, H - 12);
+
+  // ── Flashes ──
+  const flash = (lbl, a, color) => {
+    ctx.font = 'bold 16px monospace'; ctx.textAlign = 'center';
+    ctx.fillStyle = `${color},${a.toFixed(2)})`;
+    ctx.fillText(lbl, W / 2, 40); ctx.textAlign = 'left';
+  };
+  if (t < T_LEO_INSERT + 600)
+    flash('✦ DEPOT IN LEO — AWAITING TANKER FLEET', 1 - (t - T_LEO_INSERT) / 600, 'rgba(150,200,255');
+  else if (t >= T_REFUEL_DONE && t < T_REFUEL_DONE + 1800)
+    flash('✦ REFUELING COMPLETE — FULL METHALOX LOAD', 1 - (t - T_REFUEL_DONE) / 1800, 'rgba(120,230,180');
+}
+
+// ── Lunar surface state (altitude above Moon, speed, sub-phase) ───────────────
+function lunarSurfaceState(t) {
+  if (t < T_LANDING) {
+    const p = descentPos(t);
+    const altMoon = Math.max(0, p.rMoon - R_MOON);
+    const f = Math.min(1, Math.max(0, (t - T_PD_START) / (T_LANDING - T_PD_START)));
+    return { altMoon, vel: Math.max(0, 1.6 * (1 - f)), phase: 'descent' };
+  }
+  if (t < T_SURFACE_END) return { altMoon: 0, vel: 0, phase: 'surface' };
+  const p = ascentPos(t);
+  const altMoon = Math.max(0, p.rMoon - R_MOON);
+  const f = Math.min(1, Math.max(0, (t - T_SURFACE_END) / (T_ASCENT_END - T_SURFACE_END)));
+  return { altMoon, vel: 1.74 * f, phase: 'ascent' };
+}
+
+function drawLunarCraters(ctx, W, groundY, H) {
+  for (let i = 0; i < 16; i++) {
+    const depth = (i % 6) / 6;
+    const cy = groundY + 8 + depth * (H - groundY);
+    if (cy < groundY || cy > H + 20) continue;
+    const cxp = ((Math.sin(i * 5.13 + 1.7) + 1) / 2) * W;
+    const r = 5 + depth * 30;
+    ctx.fillStyle = 'rgba(20,20,24,0.5)';
+    ctx.beginPath(); ctx.ellipse(cxp, cy, r, r * 0.4, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = 'rgba(225,228,236,0.18)'; ctx.lineWidth = 1.4;
+    ctx.beginPath(); ctx.ellipse(cxp, cy, r, r * 0.4, 0, Math.PI * 1.05, Math.PI * 1.95); ctx.stroke();
+    ctx.strokeStyle = 'rgba(0,0,0,0.4)'; ctx.lineWidth = 1.4;
+    ctx.beginPath(); ctx.ellipse(cxp, cy, r, r * 0.4, 0, Math.PI * 0.05, Math.PI * 0.95); ctx.stroke();
+  }
+}
+
+// Astronauts, flag and footpath during the surface stay.
+function drawSurfaceProps(ctx, shipX, groundY, t) {
+  // Artemis flag (rigid — no atmosphere)
+  const fx = shipX + 96, fy = groundY - 2;
+  ctx.strokeStyle = '#d4d7dd'; ctx.lineWidth = 1.5;
+  ctx.beginPath(); ctx.moveTo(fx, fy); ctx.lineTo(fx, fy - 27); ctx.stroke();
+  ctx.fillStyle = '#c9352c'; ctx.fillRect(fx, fy - 27, 18, 12);
+  ctx.fillStyle = '#1d3f7a'; ctx.fillRect(fx, fy - 27, 7, 12);
+  // Two EVA astronauts near the elevator base
+  const baseX = shipX - 36;
+  for (let i = 0; i < 2; i++) {
+    const wob = Math.sin(t * 0.9 + i * 2) * 3;
+    const ax = baseX - i * 16 + wob, ay = groundY - 2;
+    ctx.fillStyle = 'rgba(0,0,0,0.35)';
+    ctx.beginPath(); ctx.ellipse(ax + 9, ay + 2, 11, 2.5, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#e8ebf0';
+    ctx.fillRect(ax - 3, ay - 9, 6, 9);
+    ctx.beginPath(); ctx.arc(ax, ay - 9, 3.1, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#b9bcc4'; ctx.fillRect(ax - 4.5, ay - 8, 2.4, 6);   // backpack
+    ctx.fillStyle = '#f2f4f8';
+    ctx.beginPath(); ctx.arc(ax, ay - 12, 2.6, 0, Math.PI * 2); ctx.fill(); // helmet
+    ctx.fillStyle = '#caa64a';
+    ctx.beginPath(); ctx.arc(ax + 0.6, ay - 12, 1.4, 0, Math.PI * 2); ctx.fill(); // gold visor
+    ctx.strokeStyle = '#e8ebf0'; ctx.lineWidth = 1.6;
+    ctx.beginPath(); ctx.moveTo(ax, ay); ctx.lineTo(ax - 2 + wob * 0.3, ay + 4); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(ax, ay); ctx.lineTo(ax + 2 - wob * 0.3, ay + 4); ctx.stroke();
+  }
+}
+
+function drawLunarTape(ctx, W, H, a2y, rocketY) {
+  const tapeX = W - 64;
+  ctx.strokeStyle = 'rgba(255,255,255,0.12)'; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(tapeX, 0); ctx.lineTo(tapeX, H); ctx.stroke();
+  ctx.font = '10px monospace';
+  for (const [a, lbl] of [[0, 'Surface'], [1, '1 km'], [5, '5 km'], [10, '10 km'], [25, '25 km']]) {
+    const y = a2y(a);
+    if (y < 12 || y > H - 4) continue;
+    ctx.strokeStyle = 'rgba(255,255,255,0.16)';
+    ctx.beginPath(); ctx.moveTo(tapeX, y); ctx.lineTo(tapeX + 6, y); ctx.stroke();
+    ctx.fillStyle = 'rgba(180,186,200,0.6)'; ctx.fillText(lbl, tapeX + 10, y + 3);
+  }
+  ctx.fillStyle = '#9aa6ff';
+  ctx.beginPath();
+  ctx.moveTo(tapeX, rocketY); ctx.lineTo(tapeX + 9, rocketY - 5); ctx.lineTo(tapeX + 9, rocketY + 5);
+  ctx.closePath(); ctx.fill();
+}
+
+// ── Lunar landing → surface operations → ascent scene ─────────────────────────
+function drawLunarSurfaceScene(ctx, W, H, t) {
+  const flick = performance.now() / 1000;
+  const st = lunarSurfaceState(t);
+  // Lander chase-cam: constant ship size, the ground rises/falls with altitude.
+  // (Not true-to-scale — at 25 km a true-scale 50 m ship would be an invisible
+  // dot; here it stays clearly visible while the altitude tape carries the scale.)
+  const rocketY = H * 0.42, shipX = W * 0.44;
+  const ART_PX   = 186;
+  const artScale = (H * 0.34) / ART_PX;     // ship ≈ 34% of canvas height, constant
+  const PXPERKM  = (H * 0.58) / 2.2;        // ~2.2 km of altitude spans ship → ground
+  const a2y      = (a) => rocketY - (a - st.altMoon) * PXPERKM;
+  const groundY  = a2y(0);
+
+  ctx.fillStyle = '#01010a'; ctx.fillRect(0, 0, W, H);
+  sceneStars(ctx, W, H, 200);
+  drawEarthDiskSky(ctx, W * 0.76, H * 0.18, 15);
+
+  // Terrain (recedes as the ship climbs)
+  if (groundY < H) {
+    const gy = Math.max(0, groundY);
+    const tg = ctx.createLinearGradient(0, groundY, 0, H);
+    tg.addColorStop(0, '#52535b'); tg.addColorStop(0.5, '#3a3b42'); tg.addColorStop(1, '#15161b');
+    ctx.fillStyle = tg; ctx.fillRect(0, gy, W, H - gy);
+    ctx.fillStyle = 'rgba(210,214,224,0.1)'; ctx.fillRect(0, groundY, W, 2);
+    drawLunarCraters(ctx, W, groundY, H);
+    if (st.altMoon < 0.04) {
+      ctx.fillStyle = 'rgba(0,0,0,0.4)';
+      ctx.beginPath(); ctx.ellipse(shipX + 62, groundY + 4, 72, 7, 0, 0, Math.PI * 2); ctx.fill();
+    }
+    if (st.phase === 'surface') drawSurfaceProps(ctx, shipX, groundY, t);
+  }
+
+  // Dust (minimal — high thrusters; a brief flare at touchdown / liftoff)
+  const touchdownDust = t >= T_LANDING && t < T_LANDING + 2.2;
+  if ((st.phase === 'descent' && st.altMoon < 0.05) || touchdownDust ||
+      (st.phase === 'ascent' && st.altMoon < 0.06)) {
+    const grow = touchdownDust ? 1 + (t - T_LANDING) * 1.2 : 1.4;
+    for (let i = 0; i < 5; i++) {
+      const dx = (i - 2) * 22 * grow * 0.5, r = 16 * grow + i * 3;
+      const cg = ctx.createRadialGradient(shipX + dx, groundY, 0, shipX + dx, groundY, r);
+      cg.addColorStop(0, 'rgba(150,150,158,0.3)'); cg.addColorStop(1, 'rgba(150,150,158,0)');
+      ctx.fillStyle = cg; ctx.beginPath(); ctx.arc(shipX + dx, groundY, r, 0, Math.PI * 2); ctx.fill();
+    }
+  }
+
+  // Vehicle (constant size — always clearly visible)
+  const ascentBurn = st.phase === 'ascent' && t < T_ASCENT_END;
+  const legs = st.phase === 'descent'
+    ? Math.max(0, Math.min(1, (0.6 - st.altMoon) / 0.6)) : 1;
+  const elevator = st.phase === 'surface'
+    ? Math.max(0, Math.min(1, ((t - T_LANDING) / (T_SURFACE_END - T_LANDING)) / 0.08)) : 0;
+  ctx.save();
+  ctx.translate(shipX, rocketY);
+  ctx.scale(artScale, artScale);
+  drawShip(ctx, {
+    variant: 'hls', legs, elevator,
+    engines: st.phase === 'ascent',
+    burning: ascentBurn,
+    thrusterBurn: st.phase === 'descent',
+    flick,
+  });
+  ctx.restore();
+
+  drawLunarTape(ctx, W, H, a2y, rocketY);
+
+  // ── Readout panel ──
+  const px = 14, py = 14;
+  drawScenePanel(ctx, px, py, 228, 132);
+  ctx.fillStyle = '#6b7280'; ctx.font = '9px monospace';
+  ctx.fillText('ALT (LUNAR)', px + 14, py + 22);
+  ctx.fillText('VELOCITY', px + 128, py + 22);
+  ctx.fillStyle = '#9aa6ff'; ctx.font = 'bold 18px monospace';
+  ctx.fillText(fmtAltKm(st.altMoon), px + 14, py + 42);
+  ctx.fillStyle = '#34d399'; ctx.font = 'bold 18px monospace';
+  ctx.fillText(st.vel.toFixed(2), px + 128, py + 42);
+  ctx.fillStyle = '#6b7280'; ctx.font = '9px monospace';
+  ctx.fillText('km/s', px + 170, py + 42);
+  ctx.strokeStyle = 'rgba(255,255,255,0.08)';
+  ctx.beginPath(); ctx.moveTo(px + 12, py + 54); ctx.lineTo(px + 216, py + 54); ctx.stroke();
+  ctx.fillStyle = '#6b7280'; ctx.font = '9px monospace';
+  ctx.fillText(st.phase === 'descent' ? 'POWERED DESCENT'
+             : st.phase === 'surface' ? 'SURFACE OPERATIONS' : 'LUNAR ASCENT', px + 14, py + 70);
+  ctx.fillStyle = '#e5e7eb'; ctx.font = '11px monospace';
+  ctx.fillText('Starship HLS', px + 14, py + 88);
+  ctx.fillStyle = '#5b616b'; ctx.font = '9px monospace';
+  ctx.fillText(st.phase === 'descent' ? 'High-mounted thrusters · low regolith'
+             : st.phase === 'surface' ? 'Crew elevator deployed · EVA'
+             : '6 Raptors · climbing to NRHO', px + 14, py + 102);
+  if (st.phase === 'surface') {
+    const days = (t - T_LANDING) / 86400;
+    ctx.fillStyle = '#9ca3af'; ctx.font = '10px monospace';
+    ctx.fillText(`Surface time: ${days.toFixed(1)} d (planned 6.5+)`, px + 14, py + 122);
+  }
+  ctx.fillStyle = 'rgba(180,190,210,0.55)'; ctx.font = '9px monospace';
+  ctx.fillText('LUNAR SOUTH POLE · Shackleton region', 14, H - 12);
+
+  // ── Flashes ──
+  for (const [ft, lbl, win] of [[T_LANDING, 'LUNAR TOUCHDOWN', 4320],
+                                [T_SURFACE_END, 'LUNAR ASCENT — LIFTOFF', 4320]]) {
+    const dt = t - ft;
+    if (dt >= 0 && dt < win) {
+      ctx.font = 'bold 16px monospace'; ctx.textAlign = 'center';
+      ctx.fillStyle = `rgba(255,255,255,${(1 - dt / win).toFixed(2)})`;
+      ctx.fillText(`✦ ${lbl}`, W / 2, 40); ctx.textAlign = 'left';
+    }
+  }
+}
+
+// ── Cislunar coast + NRHO scene (TLI → coast → NRHO insertion/loiter/DOI, and
+//    the post-rendezvous loiter) — a schematic Earth–Moon transit ────────────
+function drawCislunarScene(ctx, W, H, t) {
+  const flick = performance.now() / 1000;
+  const { alt, vel } = starshipMissionState(t);
+  ctx.fillStyle = '#02030a'; ctx.fillRect(0, 0, W, H);
+  sceneStars(ctx, W, H, 240);
+
+  const earth = { x: W * 0.15, y: H * 0.56, r: 30 };
+  const moon  = { x: W * 0.83, y: H * 0.38, r: 19 };
+  const eg = ctx.createRadialGradient(earth.x - 10, earth.y - 10, 4, earth.x, earth.y, earth.r);
+  eg.addColorStop(0, '#3a7fe0'); eg.addColorStop(0.7, '#1b4a93'); eg.addColorStop(1, '#0a2550');
+  ctx.fillStyle = eg; ctx.beginPath(); ctx.arc(earth.x, earth.y, earth.r, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = 'rgba(220,235,245,0.18)';
+  ctx.beginPath(); ctx.ellipse(earth.x - 4, earth.y + 3, earth.r * 0.6, earth.r * 0.3, 0.5, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = 'rgba(150,180,235,0.5)'; ctx.font = '9px monospace'; ctx.fillText('EARTH', earth.x - 16, earth.y + earth.r + 14);
+  const mg = ctx.createRadialGradient(moon.x - 6, moon.y - 6, 2, moon.x, moon.y, moon.r);
+  mg.addColorStop(0, '#e2ded4'); mg.addColorStop(0.6, '#a09890'); mg.addColorStop(1, '#3a3a3a');
+  ctx.fillStyle = mg; ctx.beginPath(); ctx.arc(moon.x, moon.y, moon.r, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = 'rgba(200,205,215,0.5)'; ctx.font = '9px monospace'; ctx.fillText('MOON', moon.x - 14, moon.y + moon.r + 14);
+
+  // Trans-lunar arc (Earth → Moon)
+  const ctrl = { x: W * 0.5, y: H * 0.16 };
+  const bez = (p, a, b, c) => { const u = 1 - p; return u * u * a + 2 * u * p * b + p * p * c; };
+  ctx.save(); ctx.setLineDash([5, 8]);
+  ctx.strokeStyle = 'rgba(150,180,255,0.3)'; ctx.lineWidth = 1.4;
+  ctx.beginPath();
+  for (let p = 0; p <= 1.0001; p += 0.02) {
+    const x = bez(p, earth.x + earth.r, ctrl.x, moon.x - moon.r);
+    const y = bez(p, earth.y, ctrl.y, moon.y);
+    if (p === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+  }
+  ctx.stroke(); ctx.restore();
+
+  // NRHO loop around the Moon (shown during loiter / post-rendezvous)
+  if ((t >= T_LOI && t < T_PD_START) || t > T_NRHO_RV) {
+    ctx.save(); ctx.setLineDash([3, 6]);
+    ctx.strokeStyle = 'rgba(180,200,255,0.35)'; ctx.lineWidth = 1.2;
+    ctx.beginPath(); ctx.ellipse(moon.x, moon.y - 6, 30, 46, 0, 0, Math.PI * 2); ctx.stroke();
+    ctx.restore();
+  }
+
+  // Craft position + phase label
+  let craftX, craftY, phaseLabel, sub, burning = false;
+  if (t < T_LOI) {
+    const p = Math.max(0, Math.min(1, (t - T_TLI) / (T_LOI - T_TLI)));
+    craftX = bez(p, earth.x + earth.r, ctrl.x, moon.x - moon.r);
+    craftY = bez(p, earth.y, ctrl.y, moon.y);
+    burning = t < T_TLI_END;
+    phaseLabel = burning ? 'TRANS-LUNAR INJECTION' : 'CISLUNAR COAST';
+    sub = burning ? 'ΔV ≈ 3.1 km/s · departing LEO' : '~5-day coast to the Moon';
+  } else {
+    const base = t > T_NRHO_RV ? T_NRHO_RV : T_LOI;
+    const ang  = -Math.PI / 2 + (t - base) / NRHO_PERIOD * Math.PI * 2;
+    craftX = moon.x + 30 * Math.cos(ang);
+    craftY = (moon.y - 6) + 46 * Math.sin(ang);
+    if (t > T_NRHO_RV)     { phaseLabel = 'NRHO — RENDEZVOUS COMPLETE'; sub = 'HLS holds in NRHO for reuse'; }
+    else if (t >= T_DOI)   { phaseLabel = 'DESCENT ORBIT COAST';        sub = 'Coasting to 15 km perilune'; }
+    else                   { phaseLabel = 'NRHO LOITER';                sub = 'Awaiting Orion crew · 9:2 resonant halo'; }
+  }
+
+  // Craft (small HLS) + plume during a burn
+  ctx.save(); ctx.translate(craftX, craftY); ctx.scale(0.16, 0.16);
+  drawShip(ctx, { variant: 'hls', burning, flick });
+  ctx.restore();
+  ctx.fillStyle = 'rgba(180,220,255,0.7)'; ctx.font = '9px monospace';
+  ctx.fillText('HLS', craftX + 9, craftY - 7);
+
+  // Readout panel
+  const px = 14, py = 14;
+  drawScenePanel(ctx, px, py, 236, 118);
+  ctx.fillStyle = '#6b7280'; ctx.font = '9px monospace';
+  ctx.fillText('FROM EARTH', px + 14, py + 22);
+  ctx.fillText('VELOCITY', px + 134, py + 22);
+  ctx.fillStyle = '#60a5fa'; ctx.font = 'bold 17px monospace';
+  ctx.fillText(fmtAltKm(alt), px + 14, py + 42);
+  ctx.fillStyle = '#34d399'; ctx.font = 'bold 17px monospace';
+  ctx.fillText(vel.toFixed(2), px + 134, py + 42);
+  ctx.fillStyle = '#6b7280'; ctx.font = '9px monospace'; ctx.fillText('km/s', px + 178, py + 42);
+  ctx.strokeStyle = 'rgba(255,255,255,0.08)';
+  ctx.beginPath(); ctx.moveTo(px + 12, py + 54); ctx.lineTo(px + 224, py + 54); ctx.stroke();
+  ctx.fillStyle = '#6b7280'; ctx.font = '9px monospace'; ctx.fillText(phaseLabel, px + 14, py + 70);
+  ctx.fillStyle = '#e5e7eb'; ctx.font = '11px monospace'; ctx.fillText('Starship HLS', px + 14, py + 88);
+  ctx.fillStyle = '#5b616b'; ctx.font = '9px monospace'; ctx.fillText(sub, px + 14, py + 104);
+
+  ctx.fillStyle = 'rgba(180,190,210,0.55)'; ctx.font = '9px monospace';
+  ctx.fillText('CISLUNAR SPACE · Earth–Moon transit', 14, H - 12);
+
+  // Flashes
+  for (const [ft, lbl, win] of [[T_TLI, 'TLI BURN', 600],
+                                [T_LOI, 'NRHO INSERTION', 4320],
+                                [T_DOI, 'DESCENT ORBIT INSERTION', 4320],
+                                [T_NRHO_RV, 'NRHO RENDEZVOUS', 4320]]) {
+    const dt = t - ft;
+    if (dt >= 0 && dt < win) {
+      ctx.font = 'bold 16px monospace'; ctx.textAlign = 'center';
+      ctx.fillStyle = `rgba(255,255,255,${(1 - dt / win).toFixed(2)})`;
+      ctx.fillText(`✦ ${lbl}`, W / 2, 40); ctx.textAlign = 'left';
+    }
+  }
+}
+
+function drawShipAscentView(ctx, W, H, t, opts) {
+  const hideSpent = !!(opts && opts.hideSpent);
+  const noFlash   = !!(opts && opts.noFlash);
+  const { alt, vel } = starshipMissionState(t);
+  const rocketX = W * 0.32;
+  const rocketY = H * 0.62;
+  const flick   = performance.now() / 1000;  // wall clock for plume flicker
+
+  // True-to-scale camera: same algorithm as Artemis II rocket view.
+  const STACK_KM = 0.121;   // real Starship+SH height (121 m)
+  const ART_PX   = 440;     // art height (nozzle exit → nosecone tip)
+  const A0_KM    = 100;
+  const viewKm   = (alt + A0_KM) * (0.34 / A0_KM);
+  const pxPerKm  = H / viewKm;
+  const artScale = (STACK_KM * pxPerKm) / ART_PX;
+  const a2y      = (a) => rocketY - (a - alt) * pxPerKm;
+  const groundY  = a2y(0);
+
+  const fmtAlt = (a) =>
+      a < 1    ? Math.round(a * 1000) + ' m'
+    : a < 100  ? a.toFixed(1) + ' km'
+    : a < 1000 ? Math.round(a) + ' km'
+    : a < 1e6  ? (a / 1000).toFixed(a < 1e4 ? 1 : 0) + 'k km'
+    :            (a / 1e6).toFixed(2) + 'M km';
+
+  // ── Background ────────────────────────────────────────────────────────────
+  ctx.fillStyle = '#04040d';
+  ctx.fillRect(0, 0, W, H);
+
+  // Stars (deterministic)
+  for (let i = 0; i < 260; i++) {
+    const sx = ((Math.sin(i * 7.31 + 0.4) + 1) / 2) * W;
+    const sy = ((Math.cos(i * 13.71 + 1.1) + 1) / 2) * H;
+    const br = 0.18 + 0.7 * ((i * 37 % 100) / 100);
+    ctx.fillStyle = `rgba(255,255,255,${br.toFixed(2)})`;
+    ctx.fillRect(sx, sy, i % 9 === 0 ? 2 : 1, i % 9 === 0 ? 2 : 1);
+  }
+
+  // Sky glow + ground
+  if (groundY < H) {
+    const skyTop = groundY - 240;
+    if (skyTop < H) {
+      const ag = ctx.createLinearGradient(0, Math.max(0, skyTop), 0, groundY);
+      ag.addColorStop(0, 'rgba(46,120,210,0)');
+      ag.addColorStop(1, 'rgba(96,172,236,0.34)');
+      ctx.fillStyle = ag;
+      ctx.fillRect(0, Math.max(0, skyTop), W, groundY - Math.max(0, skyTop));
+    }
+    const gg = ctx.createLinearGradient(0, groundY, 0, H);
+    gg.addColorStop(0, '#2f74b8'); gg.addColorStop(1, '#0b2c54');
+    ctx.fillStyle = gg;
+    ctx.fillRect(0, groundY, W, H - groundY);
+    ctx.fillStyle = 'rgba(255,255,255,0.06)';
+    ctx.fillRect(0, groundY, W, 2);
+    // Mechazilla launch tower (only on pad)
+    if (alt < 0.12) {
+      ctx.fillStyle = 'rgba(110,118,132,0.75)';
+      ctx.fillRect(rocketX + 66, groundY - 195, 9, 195);  // tower mast
+      ctx.fillRect(rocketX + 56, groundY - 8, 110, 8);    // base slab
+      if (t < 3) {
+        // Chopstick arms (pre-launch)
+        ctx.fillStyle = 'rgba(100,110,120,0.6)';
+        ctx.fillRect(rocketX + 68, groundY - 110, 22, 6);
+        ctx.fillRect(rocketX + 68, groundY - 130, 22, 6);
+      }
+    }
+  }
+
+  // ── Altitude tape ─────────────────────────────────────────────────────────
+  const tapeX = W - 70;
+  ctx.strokeStyle = 'rgba(255,255,255,0.14)'; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(tapeX, 0); ctx.lineTo(tapeX, H); ctx.stroke();
+  ctx.font = '10px monospace';
+  const niceStep = (span) => {
+    const raw = span / 7;
+    const mag = Math.pow(10, Math.floor(Math.log10(raw)));
+    const n   = raw / mag;
+    return (n < 1.5 ? 1 : n < 3 ? 2 : n < 7 ? 5 : 10) * mag;
+  };
+  const step = niceStep(viewKm);
+  const aTop = alt + rocketY / pxPerKm;
+  const aBot = alt - (H - rocketY) / pxPerKm;
+  for (let a = Math.ceil(Math.max(0, aBot) / step) * step; a <= aTop; a += step) {
+    const y = a2y(a);
+    if (y < 10 || y > H - 4) continue;
+    ctx.strokeStyle = 'rgba(255,255,255,0.18)';
+    ctx.beginPath(); ctx.moveTo(tapeX, y); ctx.lineTo(tapeX + 6, y); ctx.stroke();
+    ctx.fillStyle = 'rgba(170,180,200,0.65)';
+    ctx.fillText(a >= 1 && step < 1 ? a.toFixed(1) + ' km' : fmtAlt(a), tapeX + 10, y + 3);
+  }
+  // Reference markers
+  const REF = [
+    [12,     'Max-Q'],
+    [68,     'Hot staging'],
+    [100,    'Kármán line'],
+    [150,    'MECO'],
+    [300,    'LEO'],
+    [35786,  'GEO'],
+    [384400, 'Moon orbit'],
+  ];
+  for (const [a, lbl] of REF) {
+    const y = a2y(a);
+    if (y < 12 || y > H - 4) continue;
+    ctx.save();
+    ctx.setLineDash([4, 6]);
+    ctx.strokeStyle = 'rgba(120,170,255,0.22)';
+    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(tapeX, y); ctx.stroke();
+    ctx.restore();
+    ctx.fillStyle = 'rgba(150,180,235,0.5)';
+    ctx.fillText(lbl, tapeX - 82, y - 3);
+    if (lbl === 'Moon orbit') {
+      const mx = W * 0.6, mr = 9;
+      const mg = ctx.createRadialGradient(mx - 3, y - 3, 0, mx, y, mr);
+      mg.addColorStop(0, '#e2ded4'); mg.addColorStop(0.6, '#a09890'); mg.addColorStop(1, '#3a3a3a');
+      ctx.fillStyle = mg;
+      ctx.beginPath(); ctx.arc(mx, y, mr, 0, Math.PI * 2); ctx.fill();
+    }
+  }
+  // Altitude pointer
+  ctx.fillStyle = '#60a5fa';
+  ctx.beginPath();
+  ctx.moveTo(tapeX, rocketY); ctx.lineTo(tapeX + 9, rocketY - 5); ctx.lineTo(tapeX + 9, rocketY + 5);
+  ctx.closePath(); ctx.fill();
+
+  // ── Liftoff exhaust cloud ─────────────────────────────────────────────────
+  if (alt < 8 && t < 18) {
+    const grow = 1 + t * 0.55;
+    for (let i = 0; i < 6; i++) {
+      const cx = rocketX + (i - 2.5) * 24 * grow * 0.4;
+      const r  = 30 * grow + i * 4;
+      const cg = ctx.createRadialGradient(cx, groundY, 0, cx, groundY, r);
+      cg.addColorStop(0, 'rgba(230,230,235,0.45)');
+      cg.addColorStop(1, 'rgba(200,200,210,0)');
+      ctx.fillStyle = cg;
+      ctx.beginPath(); ctx.arc(cx, groundY, r, 0, Math.PI * 2); ctx.fill();
+    }
+  }
+
+  // ── Burn states ───────────────────────────────────────────────────────────
+  const boosterBurn = t < T_HOT_STAGE;
+  const shipBurn    = (t < T_SHIP_MECO) || (t >= T_TLI && t < T_TLI_END);
+  const separated   = t >= T_HOT_STAGE;
+
+  // ── Gravity-turn tilt (nose pitches downrange) ───────────────────────────
+  const tf   = Math.min(t / T_SHIP_MECO, 1);
+  const tilt = 1.15 * (1 - Math.cos(Math.PI * tf)) / 2;
+
+  const detailed = artScale * ART_PX >= 6;
+
+  // Spent-stage drift helper (screen-space; same as Artemis)
+  const drawSpent = (sepT, cx, cy, fall, side, spin, artFn) => {
+    const e = t - sepT;
+    if (e < 0 || e > 90 / Math.max(0.01, 1)) return;
+    const alpha = Math.max(0, 1 - e / 90);
+    if (alpha <= 0) return;
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    ctx.translate(rocketX + side * e * pxPerKm, rocketY + 0.5 * fall * e * e * pxPerKm);
+    ctx.rotate(tilt);
+    ctx.scale(artScale, artScale);
+    ctx.translate(cx, cy); ctx.rotate(e * spin); ctx.translate(-cx, -cy);
+    artFn();
+    ctx.restore();
+    ctx.globalAlpha = 1;
+  };
+
+  if (!detailed) {
+    // Too far out: draw a glowing marker
+    ctx.save();
+    ctx.translate(rocketX, rocketY); ctx.rotate(tilt);
+    const glow = ctx.createRadialGradient(0, 0, 0, 0, 0, 16);
+    glow.addColorStop(0, 'rgba(200,212,235,0.5)');
+    glow.addColorStop(1, 'rgba(200,212,235,0)');
+    ctx.fillStyle = glow; ctx.beginPath(); ctx.arc(0, 0, 16, 0, Math.PI*2); ctx.fill();
+    if (boosterBurn || shipBurn) {
+      drawPlume(ctx, 0, 4, 7, 18,
+        ['rgba(255,240,190,0.9)', 'rgba(255,150,45,0.5)', 'rgba(255,80,20,0)'], flick, 0);
+    }
+    ctx.fillStyle = '#d0d4d8';
+    ctx.beginPath(); ctx.moveTo(0, -9); ctx.lineTo(4.5, 4); ctx.lineTo(-4.5, 4); ctx.closePath(); ctx.fill();
+    ctx.restore();
+  } else {
+    // Booster tumbles away at hot staging (suppressed when the split view owns it)
+    if (separated && !hideSpent) {
+      drawSpent(T_HOT_STAGE, 0, -114, 0.014, -0.007, -0.018,
+        () => drawSSBooster(ctx, false, flick));
+    }
+    // Live stack (camera-tracked)
+    ctx.save();
+    ctx.translate(rocketX, rocketY);
+    ctx.rotate(tilt);
+    ctx.scale(artScale, artScale);
+    if (!separated) drawSSBooster(ctx, boosterBurn, flick);
+    drawSSShip(ctx, shipBurn, flick);
+    ctx.restore();
+  }
+
+  // ── Readout panel ─────────────────────────────────────────────────────────
+  const panelX = 14, panelY = 14;
+  ctx.fillStyle = 'rgba(8,10,20,0.62)';
+  ctx.strokeStyle = 'rgba(255,255,255,0.08)'; ctx.lineWidth = 1;
+  ctx.beginPath();
+  if (ctx.roundRect) ctx.roundRect(panelX, panelY, 218, 158, 8);
+  else ctx.rect(panelX, panelY, 218, 158);
+  ctx.fill(); ctx.stroke();
+
+  ctx.fillStyle = '#6b7280'; ctx.font = '9px monospace';
+  ctx.fillText('ALTITUDE', panelX + 14, panelY + 22);
+  ctx.fillText('VELOCITY', panelX + 116, panelY + 22);
+  ctx.fillStyle = '#60a5fa'; ctx.font = 'bold 19px monospace';
+  ctx.fillText(fmtAlt(alt), panelX + 14, panelY + 42);
+  ctx.fillStyle = '#34d399'; ctx.font = 'bold 19px monospace';
+  ctx.fillText(vel.toFixed(2), panelX + 116, panelY + 42);
+  ctx.fillStyle = '#6b7280'; ctx.font = '9px monospace';
+  ctx.fillText('km/s', panelX + 164, panelY + 42);
+
+  ctx.strokeStyle = 'rgba(255,255,255,0.08)';
+  ctx.beginPath(); ctx.moveTo(panelX+12, panelY+54); ctx.lineTo(panelX+206, panelY+54); ctx.stroke();
+  ctx.fillStyle = '#6b7280'; ctx.font = '9px monospace';
+  ctx.fillText('VEHICLE STACK', panelX + 14, panelY + 70);
+
+  const CONFIG = [
+    { label: 'Starship (HLS)',  color: '#c8ccd2', goneAt: null,        note: '6 Raptors' },
+    { label: 'Super Heavy',     color: '#90929a', goneAt: T_HOT_STAGE, note: '33 Raptors · hot-stage sep' },
+  ];
+  let ry = panelY + 86;
+  for (const c of CONFIG) {
+    const gone = c.goneAt != null && t >= c.goneAt;
+    ctx.globalAlpha = gone ? 0.34 : 1;
+    ctx.fillStyle = c.color;
+    ctx.beginPath(); ctx.arc(panelX+19, ry-3, 4, 0, Math.PI*2); ctx.fill();
+    ctx.fillStyle = gone ? '#6b7280' : '#e5e7eb'; ctx.font = '11px monospace';
+    ctx.fillText(c.label, panelX+30, ry);
+    if (gone) {
+      ctx.strokeStyle = '#6b7280';
+      ctx.beginPath();
+      ctx.moveTo(panelX+30, ry-4);
+      ctx.lineTo(panelX+30 + ctx.measureText(c.label).width, ry-4);
+      ctx.stroke();
+    }
+    ctx.fillStyle = '#5b616b'; ctx.font = '9px monospace';
+    ctx.fillText(c.note, panelX+30, ry + 13);
+    ctx.globalAlpha = 1;
+    ry += 28;
+  }
+
+  // ── Event flashes ─────────────────────────────────────────────────────────
+  const FLASH = [
+    [T_MAXQ,          'MAX-Q',              60],
+    [T_HOT_STAGE,     'HOT STAGING',        90],
+    [T_BOOSTER_CATCH, 'MECHAZILLA CATCH',   420],
+    [T_SHIP_MECO,     'SHIP MECO',          180],
+    [T_LEO_INSERT,    'LEO INSERTION',      600],
+    [T_TLI,           'TLI BURN',           600],
+    [T_LOI,           'NRHO INSERTION',     4320],
+    [T_LANDING,       'LUNAR LANDING',      4320],
+    [T_SURFACE_END,   'LUNAR ASCENT',       4320],
+  ];
+  if (!noFlash) for (const [ft, lbl, win] of FLASH) {
+    const dt = t - ft;
+    if (dt >= 0 && dt < win) {
+      ctx.font = 'bold 16px monospace';
+      ctx.fillStyle = `rgba(255,255,255,${(1 - dt/win).toFixed(2)})`;
+      ctx.textAlign = 'center';
+      ctx.fillText(`✦ ${lbl}`, W / 2, 40);
+      ctx.textAlign = 'left';
+    }
+  }
+}
+
+// ── Booster return profile (alt km, vel km/s vs mission time) ─────────────────
+// Both stages separate at ~68 km / 1.6 km/s. The booster only coasts up a little
+// (it's shed its drive to the ship and is decelerating), so the ship — still
+// firing and accelerating — stays the higher and faster-climbing vehicle the
+// whole time. The booster then falls back, flips, and is caught.
+const BOOSTER_KEYS = [
+  [T_HOT_STAGE,      68,   1.60],   // separation (~68 km)
+  [198,              80,   0.55],   // gentle coast to apogee (ship already above)
+  [T_BOOSTER_BOOST,  80,   0.50],   // boostback burn near apogee
+  [240,              64,   1.00],   // falling back, grid fins steering
+  [300,              44,   1.30],
+  [360,              20,   1.45],
+  [400,               5,   0.55],   // landing burn slows it
+  [412,               1.0, 0.25],
+  [416,               0.18,0.07],   // arriving at the tower
+  [T_BOOSTER_CATCH,   0.07,0.00],   // caught (~70 m)
+];
+function boosterReturnState(t) {
+  const K = BOOSTER_KEYS;
+  let alt, vel;
+  if (t <= K[0][0]) { alt = K[0][1]; vel = K[0][2]; }
+  else if (t >= K[K.length - 1][0]) { alt = K[K.length - 1][1]; vel = K[K.length - 1][2]; }
+  else {
+    for (let i = 0; i < K.length - 1; i++) {
+      if (t <= K[i + 1][0]) {
+        const [t0, a0, v0] = K[i], [t1, a1, v1] = K[i + 1];
+        const f = (t - t0) / (t1 - t0);
+        alt = a0 + f * (a1 - a0); vel = v0 + f * (v1 - v0); break;
+      }
+    }
+  }
+  let phase, burning = false;
+  if (t >= T_BOOSTER_CATCH)                        phase = 'caught';
+  else if (t >= 398)                             { phase = 'landing';   burning = true; }
+  else if (t >= T_BOOSTER_BOOST - 6 && t <= 236) { phase = 'boostback'; burning = true; }
+  else if (t < T_BOOSTER_BOOST - 6)                phase = 'flip';
+  else                                             phase = 'descent';
+  return { alt, vel, phase, burning };
+}
+
+// ── Booster return view — flip, boostback, descent, Mechazilla catch ──────────
+// The booster falls down the frame; the launch tower is off-screen at staging and
+// scrolls up into view as the booster nears the pad, then catches it. Altitude
+// maps non-linearly — expanded near the pad — so the catch is big while the whole
+// 80 km → 0 descent stays on screen.
+function drawBoosterReturnView(ctx, W, H, t, opts) {
+  const noFlash = !!(opts && opts.noFlash);
+  const flick = performance.now() / 1000;
+  const st = boosterReturnState(t);
+  const boosterX = W * 0.56;                    // right of the top-left readout panel
+  const Hg0 = H * 0.88;                          // ground line once fully in view
+  const ART_PX = 246, NEAR = 0.4, NEARPX = H * 0.38, TOPROOM = H * 0.30, TAU = 18;
+  const altPx = (a) => a <= NEAR ? (a / NEAR) * NEARPX
+                                 : NEARPX + TOPROOM * (1 - Math.exp(-(a - NEAR) / TAU));
+  const baseY    = (a) => Hg0 - altPx(a);        // fixed altitude ruler (booster rides it down)
+  const boosterY = baseY(st.alt);
+  const artScale = (H * 0.22) / ART_PX;          // constant booster size
+  const bHalfW   = 15 * artScale;
+  // The booster falls continuously down the frame. The ground + tower are pushed
+  // off the bottom while it's high, then scroll up into view as it nears the pad
+  // (no fade-in — Mechazilla simply isn't on screen yet at hot staging).
+  const A1 = 0.6, A2 = 7, PUSH = H * 0.5;
+  const hide    = PUSH * Math.max(0, Math.min(1, (st.alt - A1) / (A2 - A1)));
+  const groundY = Hg0 + hide;
+
+  // Background + stars
+  ctx.fillStyle = '#04040d'; ctx.fillRect(0, 0, W, H);
+  for (let i = 0; i < 150; i++) {
+    const sx = ((Math.sin(i * 8.11 + 2.3) + 1) / 2) * W;
+    const sy = ((Math.cos(i * 12.07 + 0.7) + 1) / 2) * H;
+    const br = 0.18 + 0.7 * ((i * 41 % 100) / 100);
+    ctx.fillStyle = `rgba(255,255,255,${br.toFixed(2)})`;
+    ctx.fillRect(sx, sy, i % 9 === 0 ? 2 : 1, i % 9 === 0 ? 2 : 1);
+  }
+  // Sky glow + ground (scroll up into view as the booster nears the pad)
+  if (groundY < H) {
+    const top = Math.max(0, groundY - 220);
+    const ag = ctx.createLinearGradient(0, top, 0, groundY);
+    ag.addColorStop(0, 'rgba(46,120,210,0)'); ag.addColorStop(1, 'rgba(96,172,236,0.34)');
+    ctx.fillStyle = ag; ctx.fillRect(0, top, W, groundY - top);
+    const gg = ctx.createLinearGradient(0, groundY, 0, H);
+    gg.addColorStop(0, '#2f74b8'); gg.addColorStop(1, '#0b2c54');
+    ctx.fillStyle = gg; ctx.fillRect(0, groundY, W, H - groundY);
+    ctx.fillStyle = 'rgba(255,255,255,0.06)'; ctx.fillRect(0, groundY, W, 2);
+  }
+
+  // Altitude tape (non-linear ruler; the pointer rides down it)
+  const tapeX = W - 64;
+  ctx.strokeStyle = 'rgba(255,255,255,0.14)'; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(tapeX, 0); ctx.lineTo(tapeX, H); ctx.stroke();
+  ctx.font = '10px monospace';
+  for (const [a, lbl] of [[0.5, '500 m'], [1, '1 km'], [5, '5 km'], [20, '20 km'], [50, '50 km'], [80, '80 km']]) {
+    const y = baseY(a);
+    if (y < 10 || y > H - 4) continue;
+    ctx.strokeStyle = 'rgba(255,255,255,0.18)';
+    ctx.beginPath(); ctx.moveTo(tapeX, y); ctx.lineTo(tapeX + 6, y); ctx.stroke();
+    ctx.fillStyle = 'rgba(170,180,200,0.6)'; ctx.fillText(lbl, tapeX + 10, y + 3);
+  }
+  ctx.fillStyle = '#ff8a3c';
+  ctx.beginPath();
+  ctx.moveTo(tapeX, boosterY); ctx.lineTo(tapeX + 9, boosterY - 5); ctx.lineTo(tapeX + 9, boosterY + 5);
+  ctx.closePath(); ctx.fill();
+
+  // Booster (falls down the frame as it descends)
+  let tilt = 0;
+  if (st.phase === 'flip')         tilt = 0.5 * (1 - Math.min(1, (t - T_HOT_STAGE) / Math.max(1, (T_BOOSTER_BOOST - 6) - T_HOT_STAGE)));
+  else if (st.phase === 'descent') tilt = 0.04 * Math.sin(t * 0.6);
+  else if (st.phase === 'caught')  tilt = 0.012 * Math.sin(flick * 1.2);
+  ctx.save();
+  ctx.translate(boosterX, boosterY);
+  ctx.rotate(tilt);
+  ctx.scale(artScale, artScale);
+  drawSSBooster(ctx, st.burning, flick);
+  ctx.restore();
+
+  // Mechazilla tower — scrolls up from the ground (off-screen while the booster
+  // is high); arms close as it settles in, meeting the grid fins at the catch.
+  const CATCH_OFFSET = altPx(0.07) + 200 * artScale;   // ground line → arm height
+  const gripY = groundY - CATCH_OFFSET;
+  if (gripY < H) {
+    const mastX = boosterX + bHalfW + 18;               // clear of the grid fins
+    const mastTop = gripY - 42, mastBot = Math.min(H, groundY);
+    ctx.fillStyle = 'rgba(120,128,142,0.92)'; ctx.fillRect(mastX, mastTop, 9, mastBot - mastTop);
+    ctx.strokeStyle = 'rgba(40,44,52,0.5)'; ctx.lineWidth = 1;
+    for (let yy = mastTop + 12; yy < mastBot; yy += 15) { ctx.beginPath(); ctx.moveTo(mastX, yy); ctx.lineTo(mastX + 9, yy); ctx.stroke(); }
+    if (groundY < H) { ctx.fillStyle = 'rgba(90,96,108,0.9)'; ctx.fillRect(mastX - 26, groundY - 10, 52, 10); }   // OLM / base
+    ctx.fillStyle = 'rgba(150,158,172,0.95)'; ctx.fillRect(mastX - 4, gripY - 13, 17, 26);   // carriage
+    const close = Math.max(0, Math.min(1, (0.16 - st.alt) / (0.16 - 0.07)));
+    const tipX = (mastX - 20) + (boosterX - (mastX - 20)) * close;
+    const tipY = (gripY - 46) + 46 * close;
+    ctx.strokeStyle = 'rgba(178,184,196,0.97)'; ctx.lineWidth = 6; ctx.lineCap = 'round';
+    for (const dy of [-5, 5]) {
+      ctx.beginPath(); ctx.moveTo(mastX, gripY + dy * 0.3); ctx.lineTo(tipX, tipY + dy); ctx.stroke();
+    }
+    ctx.lineCap = 'butt';
+  }
+
+  // Readout panel
+  const px = 14, py = 14;
+  drawScenePanel(ctx, px, py, 210, 126);
+  ctx.fillStyle = '#6b7280'; ctx.font = '9px monospace';
+  ctx.fillText('ALTITUDE', px + 14, py + 22);
+  ctx.fillText('VELOCITY', px + 112, py + 22);
+  ctx.fillStyle = '#ff8a3c'; ctx.font = 'bold 17px monospace';
+  ctx.fillText(fmtAltKm(st.alt), px + 14, py + 42);
+  ctx.fillStyle = '#34d399'; ctx.font = 'bold 17px monospace';
+  ctx.fillText(st.vel.toFixed(2), px + 112, py + 42);
+  ctx.fillStyle = '#6b7280'; ctx.font = '9px monospace'; ctx.fillText('km/s', px + 156, py + 42);
+  ctx.strokeStyle = 'rgba(255,255,255,0.08)';
+  ctx.beginPath(); ctx.moveTo(px + 12, py + 54); ctx.lineTo(px + 198, py + 54); ctx.stroke();
+  const PL = { flip: 'FLIP MANEUVER', boostback: 'BOOSTBACK BURN', descent: 'DESCENT · GRID FINS', landing: 'LANDING BURN', caught: 'CAUGHT ✓' };
+  ctx.fillStyle = st.phase === 'caught' ? '#34d399' : '#6b7280'; ctx.font = '9px monospace';
+  ctx.fillText(PL[st.phase], px + 14, py + 70);
+  ctx.fillStyle = '#e5e7eb'; ctx.font = '11px monospace';
+  ctx.fillText('Super Heavy', px + 14, py + 88);
+  ctx.fillStyle = '#5b616b'; ctx.font = '9px monospace';
+  ctx.fillText('33 Raptors · tower catch, no legs', px + 14, py + 104);
+
+  // Flash
+  const dtc = t - T_BOOSTER_CATCH;
+  if (!noFlash && dtc >= 0 && dtc < 420) {
+    ctx.font = 'bold 15px monospace'; ctx.textAlign = 'center';
+    ctx.fillStyle = `rgba(120,230,160,${(1 - dtc / 420).toFixed(2)})`;
+    ctx.fillText('✦ MECHAZILLA CATCH', W / 2, 38); ctx.textAlign = 'left';
+  }
+}
+
+// ── Split view: ship ascent (left) + booster return/catch (right) ─────────────
+function drawBoosterSplitView(ctx, W, H, t) {
+  const halfW = Math.floor(W / 2), rW = W - halfW;
+  const tb = t - T_HOT_STAGE;
+  const BOTH = 6, FADE = 2.5;   // s: both panes hold on the separation, then diverge
+
+  // LEFT — ship ascent (the spent booster tumbles out of frame, so both vehicles
+  // show right after separation, then the ship is the focus).
+  ctx.save();
+  ctx.beginPath(); ctx.rect(0, 0, halfW, H); ctx.clip();
+  drawShipAscentView(ctx, halfW, H, t, { hideSpent: false, noFlash: true });
+  ctx.restore();
+
+  // RIGHT — opens on the same separation shot, then crossfades to the booster cam.
+  ctx.save();
+  ctx.beginPath(); ctx.rect(halfW, 0, rW, H); ctx.clip();
+  ctx.translate(halfW, 0);
+  if (tb < BOTH) {
+    drawShipAscentView(ctx, rW, H, t, { hideSpent: false, noFlash: true });
+  } else if (tb < BOTH + FADE) {
+    drawBoosterReturnView(ctx, rW, H, t, { noFlash: true });
+    ctx.globalAlpha = 1 - (tb - BOTH) / FADE;
+    drawShipAscentView(ctx, rW, H, t, { hideSpent: false, noFlash: true });
+    ctx.globalAlpha = 1;
+  } else {
+    drawBoosterReturnView(ctx, rW, H, t, { noFlash: true });
+  }
+  ctx.restore();
+
+  // Divider + labels
+  ctx.fillStyle = 'rgba(255,255,255,0.14)'; ctx.fillRect(halfW - 1, 0, 2, H);
+  ctx.font = 'bold 10px monospace'; ctx.textAlign = 'center';
+  ctx.fillStyle = 'rgba(200,210,225,0.7)';
+  if (tb < BOTH) {
+    ctx.fillText('HOT STAGING — STARSHIP + SUPER HEAVY', W / 2, H - 14);
+  } else {
+    ctx.fillText('STARSHIP — ASCENT', halfW * 0.5, H - 14);
+    ctx.fillText('SUPER HEAVY — RETURN', halfW + rW * 0.5, H - 14);
+  }
+
+  // Combined event banner — centred over the divider, clear of both panels
+  let banner = null, col = null;
+  if (t >= T_BOOSTER_CATCH && t < T_BOOSTER_CATCH + 18) {
+    banner = '✦ MECHAZILLA CATCH'; col = `rgba(120,230,160,${(1 - (t - T_BOOSTER_CATCH) / 18).toFixed(2)})`;
+  } else if (t >= T_BOOSTER_BOOST - 6 && t <= 236) {
+    banner = 'BOOSTBACK BURN'; col = 'rgba(255,170,80,0.9)';
+  } else if (t >= T_HOT_STAGE && t < T_HOT_STAGE + 26) {
+    banner = '✦ HOT STAGING'; col = `rgba(255,255,255,${(1 - (t - T_HOT_STAGE) / 26).toFixed(2)})`;
+  }
+  if (banner) {
+    ctx.font = 'bold 16px monospace';
+    ctx.fillStyle = col;
+    ctx.fillText(banner, W / 2, 196);   // over the divider, below both panels
+  }
+  ctx.textAlign = 'left';
+}
+
+function drawStarshipRocketView(ctx, W, H, t) {
+  // Scene dispatch — a continuous narrative across the whole mission:
+  // launch ascent → LEO refuelling → cislunar/NRHO → lunar landing/ops/ascent
+  // → NRHO loiter. Every phase button lands on a real scene.
+  if (t >= T_LEO_INSERT && t < T_TLI)     { drawRefuelScene(ctx, W, H, t); return; }
+  if (t >= T_PD_START && t <= T_NRHO_RV)  { drawLunarSurfaceScene(ctx, W, H, t); return; }
+  if (t >= T_TLI)                         { drawCislunarScene(ctx, W, H, t); return; }
+  // From hot staging until the Mechazilla catch, split the canvas: watch the
+  // ship climb (left) while the booster flies back and is caught (right).
+  if (t >= T_HOT_STAGE && t <= T_BOOSTER_CATCH + 15) { drawBoosterSplitView(ctx, W, H, t); return; }
+
+  drawShipAscentView(ctx, W, H, t);
+}
+
+// ════════════════════════════════════════════════════════════════════════════
 // REACT COMPONENT
 // ════════════════════════════════════════════════════════════════════════════
 
@@ -434,6 +1771,8 @@ function StarshipSimulation() {
 
   // ── Canvas renderer handed to the shared base each frame ─────────────────────
   const draw = React.useCallback((ctx, { W, H, t, view }) => {
+    if (view === 'rocket') { drawStarshipRocketView(ctx, W, H, t); return; }
+
     ctx.fillStyle = '#040410';
     ctx.fillRect(0, 0, W, H);
     if (!trajectory) return;
@@ -637,348 +1976,189 @@ function StarshipSimulation() {
 
   }, [trajectory]);
 
+  const legend = (view) => view === 'rocket' ? (
+    <React.Fragment>
+      <div style={eyebrow}>Starship Stack</div>
+      <div style={{ display:'flex', flexDirection:'column', gap:'7px' }}>
+        {[
+          ['#c8ccd2','Starship (HLS) — 6 Raptors'],
+          ['#90929a','Super Heavy — 33 Raptors'],
+        ].map(([color, label]) => (
+          <div key={label} style={{ display:'flex', alignItems:'center', gap:'8px' }}>
+            <div style={{ width:'12px', height:'12px', borderRadius:'50%', background:color, flexShrink:0 }} />
+            <span style={{ fontSize:'11px', color:'#9ca3af' }}>{label}</span>
+          </div>
+        ))}
+      </div>
+      <div style={{ fontSize:'10px', color:'#5b616b', marginTop:'12px', lineHeight:'1.5' }}>
+        A continuous mission story — use the phase buttons below to jump between
+        acts. Launch is true-to-scale; at hot staging (~T+2:42) the view splits
+        to follow the ship's climb (left) and the booster's flyback + Mechazilla
+        catch (right) side by side. Then the LEO depot during tanker refueling
+        (aft-to-aft cryo transfer), the Earth–Moon cislunar coast and NRHO
+        insertion, and the lunar south pole for powered descent, crew-elevator
+        surface ops, and liftoff back to NRHO.
+      </div>
+    </React.Fragment>
+  ) : (
+    <TrailLegend items={[
+      ['#ff7030','Super Heavy ascent'],
+      ['#ffc040','Starship ascent'],
+      ['#40aaff','LEO + refueling'],
+      ['#dd44ff','TLI burn'],
+      ['#44ff7a','Cislunar coast'],
+      ['#80c0ff','NRHO'],
+      ['#ff5050','Powered descent'],
+      ['#50ffaa','Lunar ascent'],
+    ]} />
+  );
+
   return (
     <RocketrySim
       phases={PHASES} tEnd={T_TOTAL} draw={draw} ready={!!trajectory}
-      views={[{ id:'ascent', label:'Ascent' }, { id:'cislunar', label:'Cislunar' }, { id:'lunar', label:'Lunar/NRHO' }]}
-      defaultView="ascent"
-      speeds={[1, 10, 100, 1000, 10000, 100000]} defaultSpeed={100}
-      speedNote="(1× = real time)"
-      legend={[
-        ['#ff7030','Super Heavy ascent'],
-        ['#ffc040','Starship ascent'],
-        ['#40aaff','LEO + refueling'],
-        ['#dd44ff','TLI burn'],
-        ['#44ff7a','Cislunar coast'],
-        ['#80c0ff','NRHO'],
-        ['#ff5050','Powered descent'],
-        ['#50ffaa','Lunar ascent'],
+      views={[
+        { id:'rocket',   label:'Rocket' },
+        { id:'ascent',   label:'Ascent' },
+        { id:'cislunar', label:'Cislunar' },
+        { id:'lunar',    label:'Lunar/NRHO' },
       ]}
+      defaultView="rocket"
+      speeds={[1, 10, 100, 1000, 10000, 100000]} defaultSpeed={1}
+      speedNote="(1× = real time)"
+      legend={legend}
     />
   );
 }
 
 // ════════════════════════════════════════════════════════════════════════════
-// TECHNICAL CONTENT SECTIONS  (Section + SpecTable come from /rocketry/sim-core.js)
+// VISUAL SUMMARIES  (replaced the old spec / table sections)
 // ════════════════════════════════════════════════════════════════════════════
 
-function VehicleSpecsSection() {
+// ΔV budget as a bar chart: each maneuver sized by its velocity change, with the
+// LEO refuel point marked — shows why a reusable Starship can't reach the Moon
+// on the propellant it lifts itself.
+function DeltaVLadder() {
+  const BURNS = [
+    { label: 'Launch → LEO',        dv: 9.4,  who: 'Booster + Ship', color: '#ff7030' },
+    { label: 'LEO → TLI',           dv: 3.1,  who: 'HLS · refueled', color: '#a855f7' },
+    { label: 'TLI → NRHO',          dv: 0.45, who: 'HLS',            color: '#60a5fa' },
+    { label: 'DOI (descent orbit)', dv: 0.05, who: 'HLS',            color: '#60a5fa' },
+    { label: 'Powered descent',     dv: 2.0,  who: 'HLS',            color: '#34d399' },
+    { label: 'Lunar ascent',        dv: 1.9,  who: 'HLS',            color: '#fbbf24' },
+    { label: 'NRHO rendezvous',     dv: 0.5,  who: 'HLS',            color: '#60a5fa' },
+  ];
+  const MAX = 9.4;
   return (
-    <Section title="Vehicle Architecture">
-      <p style={{ color:'#9ca3af', fontSize:'13px', lineHeight:'1.65', marginBottom:'14px' }}>
-        Starship is a fully reusable, two-stage methalox launch system. The HLS (Human Landing System)
-        variant is optimized for the Moon: no flaps, no heat shield, mounted landing thrusters near the
-        nose to avoid kicking up regolith, and an elevator for crew transfer. The architecture chooses
-        full reuse + on-orbit refueling over single-launch direct injection — a fundamentally different
-        bet than SLS.
+    <Section title="ΔV Budget — why it must refuel to leave LEO">
+      <p style={{ color:'#9ca3af', fontSize:'13px', lineHeight:'1.6', marginBottom:'16px' }}>
+        Each bar is the velocity change for one maneuver (km/s). The full stack spends ~9.4 km/s just
+        reaching orbit — a reusable Starship has nothing left for the Moon. Refueling in LEO refills the
+        tanks so HLS can spend another ~8 km/s on the round trip.
       </p>
-      <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:'24px' }}>
+      <div style={{ display:'flex', flexDirection:'column', gap:'8px' }}>
+        {BURNS.map((b, i) => (
+          <React.Fragment key={b.label}>
+            {i === 1 && (
+              <div style={{ display:'flex', alignItems:'center', gap:'8px', padding:'2px 0' }}>
+                <div style={{ flex:1, height:'1px', background:'rgba(52,211,153,0.4)' }} />
+                <span style={{ fontSize:'11px', color:'#34d399', whiteSpace:'nowrap' }}>⛽ refuel in LEO — tanks back to full (~1,200 t)</span>
+                <div style={{ flex:1, height:'1px', background:'rgba(52,211,153,0.4)' }} />
+              </div>
+            )}
+            <div style={{ display:'flex', alignItems:'center', gap:'10px' }}>
+              <div style={{ width:'132px', fontSize:'12px', color:'#cbd5e1', textAlign:'right', flexShrink:0 }}>{b.label}</div>
+              <div style={{ flex:1, height:'20px', background:'rgba(255,255,255,0.04)', borderRadius:'4px', overflow:'hidden' }}>
+                <div style={{ width:((b.dv / MAX) * 100) + '%', height:'100%', background:b.color, opacity:0.9, minWidth:'2px' }} />
+              </div>
+              <div style={{ width:'42px', fontSize:'12px', fontFamily:'monospace', color:'#fbbf24', textAlign:'right', flexShrink:0 }}>{b.dv.toFixed(2)}</div>
+              <div style={{ width:'94px', fontSize:'10px', color:'#6b7280', flexShrink:0 }}>{b.who}</div>
+            </div>
+          </React.Fragment>
+        ))}
+      </div>
+      <div style={{ marginTop:'16px', display:'flex', gap:'12px', flexWrap:'wrap' }}>
+        {[
+          ['HLS ΔV after LEO', '~8.0 km/s'],
+          ['Raptor vacuum ISP', '380 s'],
+          ['Mass ratio needed', '≈ 8.6×'],
+          ['Propellant for ~100 t dry', '~1,200 t'],
+        ].map(([k, v]) => (
+          <div key={k} style={{ flex:'1 1 140px', padding:'10px 12px', background:'rgba(96,165,250,0.07)', borderRadius:'8px', borderLeft:'3px solid #60a5fa' }}>
+            <div style={{ fontSize:'10px', color:'#9ca3af', textTransform:'uppercase', letterSpacing:'0.05em' }}>{k}</div>
+            <div style={{ fontSize:'16px', color:'#f3f4f6', fontFamily:'monospace', marginTop:'3px' }}>{v}</div>
+          </div>
+        ))}
+      </div>
+    </Section>
+  );
+}
+
+// Refueling shown as a fuel gauge: ~14 tanker flights fill a 1,200 t depot, plus
+// a methalox-vs-hydrolox density comparison (same mass, very different volume).
+function RefuelingInfographic() {
+  const N = 14, PER = 100, NEED = 1200;
+  const CH4_H = 26, H2_H = Math.round(CH4_H * (422 / 71));  // equal-mass tank heights (px)
+  return (
+    <Section title="Orbital Refueling — why ~14 flights, and why methalox">
+      <div style={{ display:'grid', gridTemplateColumns:'1fr auto', gap:'28px', alignItems:'center' }}>
         <div>
-          <div style={{ fontSize:'11px', color:'#60a5fa', textTransform:'uppercase', letterSpacing:'0.08em', marginBottom:'8px' }}>Stack</div>
-          <SpecTable rows={[
-            ['Total height', '121.3 m (~33-story building)'],
-            ['Diameter', '9.0 m (Saturn V: 10.1 m)'],
-            ['Wet mass (stack)', '~5,000 t'],
-            ['Liftoff thrust', '7,590 tf (74.4 MN) — 2× Saturn V'],
-            ['Payload to LEO (reusable)', '~100–150 t'],
-            ['Payload to LEO (expendable)', '~250 t'],
-            ['Production line', 'Starbase, TX — 1 ship/month target'],
-          ]} />
-        </div>
-        <div>
-          <div style={{ fontSize:'11px', color:'#60a5fa', textTransform:'uppercase', letterSpacing:'0.08em', marginBottom:'8px' }}>Raptor 2 Engine</div>
-          <SpecTable rows={[
-            ['Cycle', 'Full-flow staged combustion (FFSC)'],
-            ['Propellant', 'CH₄ / LOX (methalox)'],
-            ['SL thrust', '230 tf'],
-            ['Vacuum thrust', '258 tf'],
-            ['SL ISP', '327 s'],
-            ['Vacuum ISP', '380 s'],
-            ['Chamber pressure', '~300 bar (Raptor 3 target: 350 bar)'],
-            ['Booster engines', '33 (Block 2)'],
-            ['Ship engines', '3 SL + 3 RVac'],
-          ]} />
-        </div>
-      </div>
-      <div style={{ marginTop:'18px', padding:'14px', background:'rgba(96,165,250,0.08)', borderRadius:'8px', borderLeft:'3px solid #60a5fa' }}>
-        <div style={{ fontSize:'12px', color:'#93c5fd', fontWeight:'600', marginBottom:'6px' }}>Why FFSC matters</div>
-        <div style={{ fontSize:'12px', color:'#cbd5e1', lineHeight:'1.55' }}>
-          Full-flow staged combustion runs <em>both</em> propellants through preburners. This eliminates
-          turbine seals (no fuel-rich + ox-rich mixing across a shaft), enables higher chamber pressures,
-          and improves ISP. Only three FFSC engines have ever flown: the Soviet RD-270 (test only),
-          NASA's IPD (test only), and Raptor — Raptor is the first to fly a payload.
-        </div>
-      </div>
-    </Section>
-  );
-}
-
-function RefuelingSection() {
-  return (
-    <Section title="The Refueling Architecture — Why ~14 Tanker Flights?">
-      <p style={{ color:'#9ca3af', fontSize:'13px', lineHeight:'1.65', marginBottom:'14px' }}>
-        Apollo went to the Moon in one launch by throwing away nearly the entire stack. Starship is fully
-        reusable, but a fully-reusable Starship can only deliver ~100 t to LEO. HLS needs ~1,200 t of
-        propellant in LEO to push itself to NRHO, land, and ascend. That math forces orbital refueling.
-      </p>
-      <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:'20px', marginBottom:'16px' }}>
-        <SpecTable rows={[
-          ['HLS propellant capacity', `~${PROP_SHIP} t LCH₄ + LOX`],
-          ['Tanker payload to LEO', `~${PROP_PER_TANKER} t`],
-          ['Tanker flights required', `~${N_TANKERS} (modulo boil-off + margins)`],
-          ['Architecture', 'Depot Starship aggregates propellant, HLS docks once'],
-          ['Transfer method', 'Cryogenic propellant transfer'],
-          ['Settling', 'Cold-gas RCS thrusters create artificial gravity'],
-          ['Tank pressurization', 'Autogenous (boiled propellant)'],
-        ]} />
-        <div style={{ fontSize:'12px', color:'#cbd5e1', lineHeight:'1.65' }}>
-          <div style={{ color:'#f3f4f6', fontWeight:'600', marginBottom:'8px' }}>The boil-off problem</div>
-          <p>
-            LOX boils at 90 K, LCH₄ at 110 K. Solar heating in LEO causes continuous boil-off — every
-            day in orbit, depot propellant evaporates. SpaceX's mitigations:
+          <div style={{ display:'flex', flexWrap:'wrap', gap:'5px', marginBottom:'12px', maxWidth:'330px' }}>
+            {Array.from({ length: N }).map((_, i) => (
+              <div key={i} style={{ width:'15px', height:'34px', borderRadius:'4px 4px 2px 2px',
+                background:'linear-gradient(180deg,#d4d8de,#9aa0a8)', position:'relative' }}>
+                <div style={{ position:'absolute', top:'-5px', left:'50%', transform:'translateX(-50%)',
+                  width:0, height:0, borderLeft:'4px solid transparent', borderRight:'4px solid transparent', borderBottom:'5px solid #c8ccd2' }} />
+                <div style={{ position:'absolute', bottom:'2px', left:'50%', transform:'translateX(-50%)', width:'7px', height:'4px', background:'rgba(120,160,255,0.85)', borderRadius:'1px' }} />
+              </div>
+            ))}
+          </div>
+          <p style={{ color:'#cbd5e1', fontSize:'13px', lineHeight:'1.6', maxWidth:'460px' }}>
+            A <strong style={{ color:'#f3f4f6' }}>fully reusable</strong> Starship lifts only ~{PER} t to
+            LEO — keeping propellant to fly home costs payload. HLS needs
+            <strong style={{ color:'#f3f4f6' }}> ~{NEED} t</strong> waiting in orbit to reach the Moon, land,
+            and return. A depot Starship aggregates it over the campaign; HLS docks once.
           </p>
-          <ul style={{ marginTop:'8px', paddingLeft:'18px', listStyle:'disc' }}>
-            <li>Multi-layer insulation (MLI) blankets on tank walls</li>
-            <li>Sun-shading the depot in a fixed solar attitude</li>
-            <li>Active cryocoolers to re-liquefy boil-off (concept)</li>
-            <li>Methalox over hydrolox: critical point 191 K vs 33 K, much easier to keep liquid</li>
-          </ul>
-          <p style={{ marginTop:'10px' }}>
-            <em>Methalox vs hydrolox is the unsung win.</em> Apollo and SLS use hydrolox: better ISP but
-            LH₂ density 71 kg/m³ vs LCH₄'s 422 kg/m³ → tanks 6× smaller, much less boil-off, ISRU-able on
-            Mars (Sabatier: CO₂ + 4H₂ → CH₄ + 2H₂O).
-          </p>
-        </div>
-      </div>
-
-      <div style={{ padding:'14px', background:'rgba(168,85,247,0.08)', borderRadius:'8px', borderLeft:'3px solid #a855f7' }}>
-        <div style={{ fontSize:'12px', color:'#d8b4fe', fontWeight:'600', marginBottom:'6px' }}>Depot vs direct tanker</div>
-        <div style={{ fontSize:'12px', color:'#cbd5e1', lineHeight:'1.55' }}>
-          Two architectures: (1) tanker-to-HLS direct, requiring ~14 rendezvous each with HLS, or
-          (2) a depot Starship that tankers fill, then HLS docks once. SpaceX has publicly favored the
-          depot approach since 2022 — it amortizes boil-off insulation onto a single dedicated vehicle
-          and means HLS only does one rendezvous, simplifying flight ops for the human-rated vehicle.
-        </div>
-      </div>
-    </Section>
-  );
-}
-
-function NRHOSection() {
-  return (
-    <Section title="Why NRHO? — The 9:2 Resonant Halo Orbit">
-      <p style={{ color:'#9ca3af', fontSize:'13px', lineHeight:'1.65', marginBottom:'14px' }}>
-        NRHO (Near-Rectilinear Halo Orbit) is a family of orbits around the Earth-Moon L₂ Lagrange point.
-        Artemis specifically uses an L₂ Southern NRHO with perilune ~3,200 km and apolune ~70,000 km
-        above the lunar surface. It's not just a clever choice — it's enabling.
-      </p>
-      <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:'20px' }}>
-        <SpecTable rows={[
-          ['Perilune altitude', '~3,200 km'],
-          ['Apolune altitude', '~70,000 km'],
-          ['Orbital period', '~6.5 days (real; 7.8 d Keplerian)'],
-          ['Inclination', '~50–90° (polar, varies in family)'],
-          ['Resonance', '9:2 with lunar synodic month'],
-          ['Stationkeeping ΔV', '~5–15 m/s/year'],
-          ['NRHO insertion ΔV from TLI', '~0.45 km/s (vs LLO ~0.9 km/s)'],
-          ['Surface access ΔV from NRHO', '~2.5 km/s (descent)'],
-        ]} />
-        <div style={{ fontSize:'12px', color:'#cbd5e1', lineHeight:'1.65' }}>
-          <div style={{ color:'#f3f4f6', fontWeight:'600', marginBottom:'8px' }}>What "9:2 resonance" buys you</div>
-          <p>
-            In the time the Moon orbits Earth twice (relative to the Sun — one synodic period is 29.5
-            days), NRHO completes exactly 9 revolutions: 9 × 6.5 ≈ 58.5 ≈ 2 × 29.5. This phase-locks
-            the orbit to the Sun-Earth-Moon geometry and means:
-          </p>
-          <ul style={{ marginTop:'8px', paddingLeft:'18px', listStyle:'disc' }}>
-            <li><strong>No lunar/Earth eclipses</strong> — the orbit threads between shadow cones</li>
-            <li><strong>Continuous Earth communication</strong> — never occluded by the Moon</li>
-            <li><strong>Cheap stationkeeping</strong> — quasi-stable in the 3-body problem</li>
-            <li><strong>Accessible from anywhere on the lunar surface</strong> — including the polar regions where Artemis wants to land</li>
-          </ul>
-          <p style={{ marginTop:'10px' }}>
-            Apollo used LLO (low lunar orbit, ~100 km circular). LLO requires more ΔV to reach from TLI,
-            is gravitationally unstable due to lunar mascons, and loses comm whenever the orbiter is
-            behind the Moon. NRHO trades those problems for a longer descent — worth it for Gateway.
-          </p>
-        </div>
-      </div>
-    </Section>
-  );
-}
-
-function DeltaVSection() {
-  return (
-    <Section title="ΔV Budget — How Starship Compares">
-      <p style={{ color:'#9ca3af', fontSize:'13px', lineHeight:'1.65', marginBottom:'14px' }}>
-        The total ΔV from LEO to lunar surface and back is ~9–10 km/s. Starship's reusability tax — that
-        100 t of LEO payload — means it cannot do this on the propellant it lifts itself. Refueling
-        in LEO unlocks Earth-escape ΔV by treating LEO as a propellant well.
-      </p>
-      <table style={{ width:'100%', fontSize:'13px', color:'#d1d5db', borderCollapse:'collapse' }}>
-        <thead>
-          <tr style={{ borderBottom:'1px solid rgba(255,255,255,0.15)' }}>
-            <th style={{ padding:'10px 8px', textAlign:'left', color:'#9ca3af', fontWeight:'600' }}>Maneuver</th>
-            <th style={{ padding:'10px 8px', textAlign:'right', color:'#9ca3af', fontWeight:'600' }}>ΔV (km/s)</th>
-            <th style={{ padding:'10px 8px', textAlign:'left', color:'#9ca3af', fontWeight:'600' }}>Vehicle</th>
-            <th style={{ padding:'10px 8px', textAlign:'left', color:'#9ca3af', fontWeight:'600' }}>Notes</th>
-          </tr>
-        </thead>
-        <tbody>
-          {[
-            ['LEO insertion', '~9.4', 'Booster + Ship', 'Includes gravity & drag losses'],
-            ['LEO → TLI', '~3.1', 'HLS (after refuel)', 'Equivalent to direct Hohmann to Moon'],
-            ['TLI → NRHO insertion', '~0.45', 'HLS', 'Much cheaper than LLO (~0.9)'],
-            ['NRHO → descent ellipse', '~0.05', 'HLS', 'DOI burn at apolune'],
-            ['Powered descent', '~2.0', 'HLS', 'From 15 km to soft touchdown'],
-            ['Lunar ascent', '~1.9', 'HLS', 'Surface → NRHO insertion'],
-            ['NRHO insertion (return)', '~0.5', 'HLS', 'Rendezvous with Orion'],
-          ].map((row, i) => (
-            <tr key={i} style={{ borderBottom:'1px solid rgba(255,255,255,0.05)' }}>
-              <td style={{ padding:'8px', color:'#e5e7eb' }}>{row[0]}</td>
-              <td style={{ padding:'8px', textAlign:'right', color:'#fbbf24', fontFamily:'monospace' }}>{row[1]}</td>
-              <td style={{ padding:'8px', color:'#9ca3af' }}>{row[2]}</td>
-              <td style={{ padding:'8px', color:'#9ca3af', fontSize:'12px' }}>{row[3]}</td>
-            </tr>
-          ))}
-          <tr style={{ borderTop:'2px solid rgba(255,255,255,0.15)', background:'rgba(96,165,250,0.06)' }}>
-            <td style={{ padding:'10px 8px', fontWeight:'600', color:'#f3f4f6' }}>HLS total (LEO → NRHO → surface → NRHO)</td>
-            <td style={{ padding:'10px 8px', textAlign:'right', color:'#fbbf24', fontFamily:'monospace', fontWeight:'700' }}>~8.0</td>
-            <td style={{ padding:'10px 8px' }}></td>
-            <td style={{ padding:'10px 8px', color:'#9ca3af', fontSize:'12px' }}>Requires full ~1,200 t methalox load</td>
-          </tr>
-        </tbody>
-      </table>
-      <div style={{ marginTop:'14px', fontSize:'12px', color:'#9ca3af', lineHeight:'1.6' }}>
-        With Raptor's 380 s vacuum ISP, the rocket equation says HLS needs a mass ratio of
-        e^(8000/(380·9.81)) ≈ 8.6× — i.e., 1 kg of dry mass per 8.6 kg of stack at burnout. That's why
-        the dry mass of HLS (~100 t) gets paired with ~1,200 t of propellant. There's no slack.
-      </div>
-    </Section>
-  );
-}
-
-function InnovationsSection() {
-  return (
-    <Section title="Engineering Innovations">
-      <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:'20px' }}>
-        <div>
-          <div style={{ color:'#f3f4f6', fontWeight:'600', marginBottom:'6px', fontSize:'14px' }}>Hot Staging (IFT-4, June 2024)</div>
-          <div style={{ fontSize:'12px', color:'#cbd5e1', lineHeight:'1.6' }}>
-            Stage separation while the booster's center 3 engines are still firing — Soviet-style.
-            Ship lights all 6 Raptors before the booster stops thrusting, eliminating the ullage and
-            settling deadtime of cold staging. Yields ~10% more payload to LEO. Required a vented
-            hot staging ring (added between booster and ship in Block 2) to channel ship exhaust.
+          <div style={{ marginTop:'10px', fontSize:'17px', fontFamily:'monospace', color:'#50c8ff' }}>
+            {PER} t × ~{N} flights ≈ {NEED} t
           </div>
         </div>
-        <div>
-          <div style={{ color:'#f3f4f6', fontWeight:'600', marginBottom:'6px', fontSize:'14px' }}>Mechazilla Chopstick Catch (IFT-5, Oct 2024)</div>
-          <div style={{ fontSize:'12px', color:'#cbd5e1', lineHeight:'1.6' }}>
-            Super Heavy returns directly to the launch tower and is caught mid-air by two articulated
-            arms. Saves ~20 t of landing legs, eliminates a separate landing pad, and allows the same
-            tower to lift the booster back onto a new ship — same-day reuse target. Catch tolerance:
-            ~1 m radial, ~50 cm/s descent velocity.
+        <div style={{ textAlign:'center' }}>
+          <div style={{ position:'relative', width:'72px', height:'160px', margin:'0 auto',
+            border:'2px solid rgba(255,255,255,0.2)', borderRadius:'10px', overflow:'hidden', background:'rgba(255,255,255,0.03)' }}>
+            <div style={{ position:'absolute', left:0, right:0, bottom:0, top:0,
+              background:'linear-gradient(180deg, rgba(80,200,255,0.5), rgba(42,127,208,0.6))' }} />
+            {Array.from({ length: N - 1 }).map((_, i) => (
+              <div key={i} style={{ position:'absolute', left:0, right:0, bottom:(((i + 1) / N) * 100) + '%', height:'1px', background:'rgba(255,255,255,0.16)' }} />
+            ))}
+            <div style={{ position:'absolute', top:'5px', left:0, right:0, textAlign:'center', fontSize:'11px', fontFamily:'monospace', color:'#eaf5ff' }}>{NEED} t</div>
           </div>
-        </div>
-        <div>
-          <div style={{ color:'#f3f4f6', fontWeight:'600', marginBottom:'6px', fontSize:'14px' }}>Methalox Choice (vs Hydrolox)</div>
-          <div style={{ fontSize:'12px', color:'#cbd5e1', lineHeight:'1.6' }}>
-            Lower ISP than hydrolox (380 s vs 450 s) but: (1) 6× denser → smaller tanks → lower dry
-            mass, (2) doesn't embrittle steel → cheap structural steel instead of aluminum-lithium,
-            (3) easier cryo storage, (4) <strong>producible on Mars</strong> from CO₂ + H₂O via the
-            Sabatier process — the whole Starship architecture is downstream of this choice.
-          </div>
-        </div>
-        <div>
-          <div style={{ color:'#f3f4f6', fontWeight:'600', marginBottom:'6px', fontSize:'14px' }}>Lunar Regolith Mitigation</div>
-          <div style={{ fontSize:'12px', color:'#cbd5e1', lineHeight:'1.6' }}>
-            Apollo's descent engines blasted regolith hundreds of meters laterally, damaging Surveyor 3.
-            Starship HLS mounts its terminal descent thrusters ~30 m up the body so the exhaust plume
-            spreads before reaching the surface. Trade-off: heavier vehicle, but no dust contamination
-            of solar panels, no fouling of surface samples, no risk to nearby assets.
-          </div>
+          <div style={{ fontSize:'10px', color:'#9ca3af', marginTop:'6px' }}>LEO depot</div>
         </div>
       </div>
-    </Section>
-  );
-}
 
-function OpenChallengesSection() {
-  return (
-    <Section title="Open Engineering Challenges">
-      <div style={{ fontSize:'13px', color:'#cbd5e1', lineHeight:'1.65' }}>
-        <p>
-          Public technical risks and what they imply:
+      <div style={{ marginTop:'20px', paddingTop:'18px', borderTop:'1px solid rgba(255,255,255,0.08)',
+        display:'flex', gap:'28px', alignItems:'flex-end', flexWrap:'wrap' }}>
+        <div style={{ display:'flex', gap:'24px', alignItems:'flex-end' }}>
+          <div style={{ textAlign:'center' }}>
+            <div style={{ width:'56px', height:H2_H + 'px', margin:'0 auto', border:'2px solid rgba(150,190,255,0.35)', borderRadius:'6px',
+              background:'linear-gradient(180deg, rgba(150,190,255,0.35), rgba(110,150,230,0.2))' }} />
+            <div style={{ fontSize:'11px', color:'#cbd5e1', marginTop:'6px' }}>LH₂</div>
+            <div style={{ fontSize:'10px', color:'#6b7280' }}>71 kg/m³</div>
+          </div>
+          <div style={{ textAlign:'center' }}>
+            <div style={{ width:'56px', height:CH4_H + 'px', margin:'0 auto', border:'2px solid rgba(80,200,255,0.4)', borderRadius:'6px',
+              background:'linear-gradient(180deg, rgba(80,200,255,0.55), rgba(42,127,208,0.6))' }} />
+            <div style={{ fontSize:'11px', color:'#cbd5e1', marginTop:'6px' }}>LCH₄</div>
+            <div style={{ fontSize:'10px', color:'#6b7280' }}>422 kg/m³</div>
+          </div>
+        </div>
+        <p style={{ flex:'1 1 260px', color:'#cbd5e1', fontSize:'12px', lineHeight:'1.6', minWidth:'240px' }}>
+          <strong style={{ color:'#f3f4f6' }}>Same propellant mass.</strong> Methalox is ~6× denser than
+          liquid hydrogen, so it packs into a fraction of the volume → smaller, lighter tanks and far less
+          boil-off in orbit. It also doesn't embrittle steel and is makeable on Mars (Sabatier) — the whole
+          architecture is downstream of this choice.
         </p>
-        <ul style={{ marginTop:'10px', paddingLeft:'20px', listStyle:'disc' }}>
-          <li style={{ marginBottom:'8px' }}>
-            <strong style={{ color:'#fbbf24' }}>Cryogenic propellant transfer at scale.</strong> NASA's
-            CRYOTE and Robotic Refueling Mission-3 have demonstrated transfer at small scale.
-            Transferring 100+ tonnes through a settling-induced ullage with sub-1% loss is unprecedented.
-            Probably the schedule-driving risk for Artemis III.
-          </li>
-          <li style={{ marginBottom:'8px' }}>
-            <strong style={{ color:'#fbbf24' }}>Boil-off over multi-week storage.</strong> 14 tanker
-            flights at one per week means the depot stores propellant for ~3 months. Even with MLI,
-            passive boil-off is non-trivial — Artemis III may require active cooling, which has
-            never flown.
-          </li>
-          <li style={{ marginBottom:'8px' }}>
-            <strong style={{ color:'#fbbf24' }}>Raptor reliability.</strong> 33 engines on the booster
-            with the loss of any 3 catastrophic to mission success. SpaceX has driven engine-out
-            tolerance via redundancy, but reaching aircraft-like reliability (~10⁻⁹ failures/cycle)
-            requires order-of-magnitude improvements over current ~10⁻³ per-test rate.
-          </li>
-          <li style={{ marginBottom:'8px' }}>
-            <strong style={{ color:'#fbbf24' }}>Lunar surface integrity.</strong> Starship HLS will be
-            the heaviest object ever placed on the Moon (~100 t dry). The landing pad — regolith,
-            potentially with sub-surface ice — has to support that without collapsing. Bearing-pressure
-            margins are being modeled but not tested at scale.
-          </li>
-          <li>
-            <strong style={{ color:'#fbbf24' }}>Crew launch ConOps.</strong> Crew currently launches on
-            SLS/Orion and rendezvous with HLS at NRHO. A "Starship for crew" path requires LES, abort
-            modes during ascent, and a launch profile suitable for human ratings — none of which the
-            current vehicle has demonstrated.
-          </li>
-        </ul>
       </div>
-    </Section>
-  );
-}
-
-function ComparisonSection() {
-  return (
-    <Section title="Architecture Comparison: Apollo · SLS/Orion · Starship HLS">
-      <table style={{ width:'100%', fontSize:'13px', color:'#d1d5db', borderCollapse:'collapse' }}>
-        <thead>
-          <tr style={{ borderBottom:'1px solid rgba(255,255,255,0.15)' }}>
-            <th style={{ padding:'10px 8px', textAlign:'left', color:'#9ca3af' }}></th>
-            <th style={{ padding:'10px 8px', textAlign:'left', color:'#60a5fa' }}>Apollo</th>
-            <th style={{ padding:'10px 8px', textAlign:'left', color:'#60a5fa' }}>SLS / Orion</th>
-            <th style={{ padding:'10px 8px', textAlign:'left', color:'#60a5fa' }}>Starship HLS</th>
-          </tr>
-        </thead>
-        <tbody>
-          {[
-            ['Mass to TLI', '~45 t', '~27 t', '~150 t (post-refuel)'],
-            ['Mass to lunar surface', '~5 t (LM)', 'N/A (orbit only)', '~50–100 t (HLS dry + payload)'],
-            ['Launches per mission', '1', '1 (crew) + multiple HLS', '1 (crew) + ~15 (HLS + tankers)'],
-            ['Architecture', 'Direct ascent', 'LOR via NRHO', 'Refueled NRHO rendezvous'],
-            ['Propellant', 'LH₂ + LOX / N₂O₄+UDMH', 'LH₂ + LOX', 'LCH₄ + LOX (methalox)'],
-            ['Lunar surface stay', '~3 days (Apollo 17)', 'N/A', '~6.5+ days'],
-            ['Cost per mission', '~$1.5B (2024 USD)', '~$4.2B', '~$2B (SpaceX target; will vary)'],
-            ['Reusability', 'None', 'Orion reusable (planned)', 'Booster + Ship fully reusable'],
-          ].map((row, i) => (
-            <tr key={i} style={{ borderBottom:'1px solid rgba(255,255,255,0.05)' }}>
-              <td style={{ padding:'8px', color:'#9ca3af', fontWeight:'600' }}>{row[0]}</td>
-              <td style={{ padding:'8px' }}>{row[1]}</td>
-              <td style={{ padding:'8px' }}>{row[2]}</td>
-              <td style={{ padding:'8px', color:'#f3f4f6' }}>{row[3]}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
     </Section>
   );
 }
@@ -990,13 +2170,8 @@ function StarshipLunarPage() {
   return (
     <div>
       <StarshipSimulation />
-      <VehicleSpecsSection />
-      <RefuelingSection />
-      <NRHOSection />
-      <DeltaVSection />
-      <InnovationsSection />
-      <OpenChallengesSection />
-      <ComparisonSection />
+      <DeltaVLadder />
+      <RefuelingInfographic />
 
       <div style={{
         marginTop:'24px', padding:'16px', fontSize:'12px', color:'#6b7280', lineHeight:'1.55',
