@@ -1,0 +1,5 @@
+# Claude Code local files (memory, settings)
+.claude/
+
+# Local scratch / work-in-progress
+training/
